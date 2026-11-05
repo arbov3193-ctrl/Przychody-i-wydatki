@@ -1,0 +1,18 @@
+# The family budget web app (installable on the iPhone home screen) and its small API.
+# Deployed by .github/workflows/budget.yml.
+name = "budget"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[durable_objects.bindings]]
+name = "HOUSE"
+class_name = "House"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["House"]

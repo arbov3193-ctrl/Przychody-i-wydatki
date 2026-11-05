@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Бюджет">
+<meta name="theme-color" content="#101418">
+<title>Бюджет</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+<nav id="tabs">
+  <button data-tab="month" class="on"><span>📊</span>Месяц</button>
+  <button data-tab="inbox"><span>📥</span>Разобрать<i id="badge"></i></button>
+  <button data-tab="add" class="plus"><span>＋</span></button>
+  <button data-tab="history"><span>🧾</span>История</button>
+  <button data-tab="settings"><span>⚙️</span>Ещё</button>
+</nav>
+<div id="sheet" class="sheet"></div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
