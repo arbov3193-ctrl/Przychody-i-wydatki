@@ -1,5 +1,5 @@
 # The family budget web app (installable on the iPhone home screen) and its small API.
-# Deployed by .github/workflows/budget.yml.
+# Deployed by .github/workflows/deploy.yml.
 name = "budget"
 main = "src/worker.js"
 compatibility_date = "2025-01-01"

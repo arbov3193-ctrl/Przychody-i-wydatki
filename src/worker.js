@@ -9,7 +9,9 @@
 //   POST /api/h/<id>/categories      (X-Key) {categories}
 //   POST /api/h/<id>/plan            (X-Key) {month, income, limits}
 //   POST /api/h/<id>/member          (X-Key) {who}
+//   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
+//   GET  /api/in/<id>/<key>          → {inbox, inboxSum, spent, budget, left, text}   for a reminder / widget Shortcut
 import { DurableObject } from "cloudflare:workers";
 
 export default {
@@ -59,6 +61,7 @@ export class House extends DurableObject {
 
     if (url.pathname === "/state") {
       const month = monthOf(url.searchParams.get("month"));
+      await applyRecurring(s, month);
       return json({
         name: await s.get("name"),
         members: (await s.get("members")) || [],
@@ -69,8 +72,23 @@ export class House extends DurableObject {
         prevTotal: total((await s.get(`tx:${prevMonth(month)}`)) || []),
         inbox: (await s.get("inbox")) || [],
         rules: (await s.get("rules")) || {},
+        recurring: (await s.get("recurring")) || [],
         month,
       });
+    }
+    if (url.pathname === "/inbox" && request.method === "GET") {
+      // for the Shortcut that reminds to sort the payments (and can show «left this month» in a widget)
+      const month = today().slice(0, 7);
+      await applyRecurring(s, month);
+      const inbox = (await s.get("inbox")) || [];
+      const tx = (await s.get(`tx:${month}`)) || [];
+      const plan = (await s.get(`plan:${month}`)) || (await s.get(`plan:${prevMonth(month)}`)) || { income: 0, limits: {} };
+      const budget = plan.income || Object.values(plan.limits || {}).reduce((a, b) => a + b, 0);
+      const spent = total(tx);
+      const left = Math.round((budget - spent) * 100) / 100;
+      const n = inbox.length;
+      const text = n ? `📥 Разобрать: ${n} ${plural(n, "трата", "траты", "трат")} на ${zl(total(inbox))}` : "";
+      return json({ inbox: n, inboxSum: total(inbox), spent, budget, left, text, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
     }
     if (url.pathname === "/inbox") {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
@@ -155,6 +173,17 @@ export class House extends DurableObject {
       await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits });
       return json({ ok: true });
     }
+    if (url.pathname === "/recurring") {
+      const cur = today().slice(0, 7);
+      const list = (Array.isArray(body.recurring) ? body.recurring : []).slice(0, 40).map((r) => ({
+        id: /^[a-z0-9]{8}$/.test(r.id || "") ? r.id : rand(8),
+        amount: parseAmount(r.amount), cat: String(r.cat || "").slice(0, 12), note: String(r.note || "").slice(0, 80),
+        day: Math.min(31, Math.max(1, Math.round(Number(r.day)) || 1)),
+        from: /^\d{4}-\d{2}$/.test(r.from || "") ? r.from : cur,
+      })).filter((r) => r.amount && r.cat);
+      await s.put("recurring", list);
+      return json({ ok: true, recurring: list });
+    }
     if (url.pathname === "/member") {
       const who = String(body.who || "").trim().slice(0, 20);
       if (!who) return json({ error: "who" }, 400);
@@ -165,6 +194,29 @@ export class House extends DurableObject {
     }
     return json({ error: "not found" }, 404);
   }
+}
+
+// Monthly expenses (rent, phone, subscriptions) are written into the month on their day, once:
+// `rec:YYYY-MM` remembers which ones are done, so one deleted by hand does not come back.
+async function applyRecurring(s, month) {
+  const list = (await s.get("recurring")) || [];
+  if (!list.length) return;
+  const now = today();
+  const cur = now.slice(0, 7);
+  if (month > cur) return;
+  const done = (await s.get(`rec:${month}`)) || [];
+  const [y, mo] = month.split("-").map(Number);
+  const days = new Date(y, mo, 0).getDate();
+  const add = list.filter((r) => !done.includes(r.id) && r.from <= month && (month < cur || Math.min(r.day, days) <= Number(now.slice(8, 10))));
+  if (!add.length) return;
+  const k = `tx:${month}`;
+  const tx = (await s.get(k)) || [];
+  for (const r of add) {
+    tx.unshift({ id: rand(8), amount: r.amount, cat: r.cat, note: r.note, who: "", date: `${month}-${String(Math.min(r.day, days)).padStart(2, "0")}`, time: Date.now(), from: "rec", rec: r.id });
+    done.push(r.id);
+  }
+  await s.put(k, tx);
+  await s.put(`rec:${month}`, done);
 }
 
 const DEFAULT_CATEGORIES = [
@@ -189,6 +241,8 @@ function parseAmount(v) {
   const n = Number(m[1].replace(",", "."));
   return n > 0 && n < 1e7 ? Math.round(n * 100) / 100 : 0;
 }
+const plural = (n, a, b, c) => (n % 10 === 1 && n % 100 !== 11 ? a : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? b : c);
+const zl = (n) => `${n.toLocaleString("ru-RU", { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 })} zł`;
 const total = (list) => Math.round(list.reduce((a, t) => a + t.amount, 0) * 100) / 100;
 function today() {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map((x) => [x.type, x.value]));

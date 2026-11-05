@@ -247,9 +247,10 @@ function renderHistory() {
     if (t.date !== day) { day = t.date; html += `<div class="day">${dayName(day)}</div>`; }
     const c = catOf(t.cat);
     html += `<div class="item" onclick="openEdit('${t.id}')"><div class="e">${c.emoji}</div><div class="sp"><div>${esc(t.note || c.name)}</div>
-      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
+      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" : t.from === "rec" ? " · 🔁 каждый месяц" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
   }
-  app.innerHTML = html + `</div><div class="small muted" style="text-align:center;margin-top:10px">Итого: ${fmt(list.reduce((a, t) => a + t.amount, 0))}</div>`;
+  app.innerHTML = html + `</div><div class="small muted" style="text-align:center;margin-top:10px">Итого: ${fmt(list.reduce((a, t) => a + t.amount, 0))}</div>
+    <button class="btn ghost" onclick="exportCsv()">📤 Выгрузить ${MONTHS[Number(month.slice(5)) - 1]} в Excel (CSV)</button>`;
 }
 function dayName(iso) {
   const t = todayIso();
@@ -286,6 +287,28 @@ function renderSettings() {
       <button class="btn ghost" onclick="copy('${esc(hook)}')">📋 Скопировать ссылку для «Команд»</button>
       <div class="muted" style="margin-top:8px">BLIK, переводы и оплата пластиковой картой сюда не попадают — их добавляйте кнопкой ＋.</div>
     </div>
+    <h2>Каждый месяц</h2><div class="card">
+      <div class="small muted">Аренда, связь, подписки — сами добавятся в бюджет в свой день месяца.</div>
+      ${(S.recurring || []).map((r, i) => `<div class="item" onclick="openRec(${i})"><div class="e">${catOf(r.cat).emoji}</div><div class="sp"><div>${esc(r.note || catOf(r.cat).name)}</div>
+        <div class="small muted">${r.day}-го числа · ${esc(catOf(r.cat).name)}</div></div><div class="a">${fmt(r.amount)}</div></div>`).join("")}
+      <button class="btn ghost" onclick="openRec(-1)">＋ Повторяющаяся трата</button>
+    </div>
+    <h2>Напоминание «разобрать траты» и виджет</h2><div class="card small">
+      Ссылка ниже (открывать методом <b>GET</b>) отвечает, сколько трат ждёт в «Разобрать» и сколько осталось в бюджете.
+      <ol>
+        <li><b>«Команды»</b> → <b>«Автоматизация»</b> → <b>＋</b> → <b>«Время суток»</b>, например 21:00, ежедневно → «Запускать сразу»</li>
+        <li>Действие <b>«Получить содержимое URL»</b> — ссылка ниже, метод GET</li>
+        <li><b>«Получить значение словаря»</b> → ключ <b>inbox</b></li>
+        <li><b>«Если»</b> значение <b>больше 0</b> → <b>«Показать уведомление»</b>, текст — значение ключа <b>text</b> из того же ответа</li>
+      </ol>
+      Виджет: отдельная команда с теми же шагами, но значение ключа <b>leftText</b> («Осталось 1 234 zł») → «Показать результат»; добавьте виджет «Команды» на экран Домой.
+      <div class="code">${esc(hook)}</div>
+      <button class="btn ghost" onclick="copy('${esc(hook)}')">📋 Скопировать ссылку</button>
+    </div>
+    <h2>Выгрузка</h2><div class="card">
+      <button class="btn ghost" style="margin-top:0" onclick="exportCsv()">📤 ${monthName(month)} в Excel (CSV)</button>
+      <button class="btn ghost" onclick="exportYear()">📤 Весь ${month.slice(0, 4)} год (CSV)</button>
+    </div>
     <h2>Категории</h2><div class="card">
       ${S.categories.map((c, i) => `<div class="cat"><input style="width:56px;text-align:center;margin:0" value="${esc(c.emoji)}" onchange="catEdit(${i},'emoji',this.value)">
         <input style="margin:0" value="${esc(c.name)}" onchange="catEdit(${i},'name',this.value)"><button class="btn ghost" style="width:auto;margin:0;padding:10px" onclick="catDel(${i})">✕</button></div>`).join("")}
@@ -309,6 +332,81 @@ window.catAdd = async () => {
   S.categories.push({ id: Math.random().toString(36).slice(2, 8), emoji: "🏷", name: n }); await api("/categories", { categories: S.categories }); render();
 };
 window.leave = () => { if (!confirm("Отключить телефон от семейного бюджета? Данные останутся на сервере.")) return; localStorage.clear(); house = null; S = null; render(); };
+
+// ------------------------------------------------------------------ monthly expenses
+
+window.openRec = (i) => {
+  const r = i >= 0 ? S.recurring[i] : { amount: "", cat: "", note: "", day: new Date().getDate() };
+  openSheet(`<div class="row"><b class="sp">${i >= 0 ? "Каждый месяц" : "Новая повторяющаяся трата"}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <label>Сумма, zł</label><input id="rAmount" inputmode="decimal" value="${r.amount ? String(r.amount).replace(".", ",") : ""}" placeholder="0">
+    <label>Название</label><input id="rNote" value="${esc(r.note)}" placeholder="Аренда, телефон, Netflix…">
+    <label>Какого числа</label><input id="rDay" inputmode="numeric" value="${r.day}">
+    <label>Категория</label><div class="cats">${S.categories.map((c) => `<button class="${r.cat === c.id ? "on" : ""}" data-id="${c.id}" onclick="document.querySelectorAll('#sheet .cats button').forEach(b=>b.classList.remove('on'));this.classList.add('on')"><span>${c.emoji}</span>${esc(c.name)}</button>`).join("")}</div>
+    <button class="btn" onclick="saveRec(${i})">Сохранить</button>
+    ${i >= 0 ? `<button class="btn red" onclick="delRec(${i})">Больше не повторять</button><div class="small muted" style="margin-top:6px">Уже добавленные траты останутся в истории.</div>` : ""}`);
+};
+window.saveRec = async (i) => {
+  const amount = Number(String($("#rAmount").value).replace(",", "."));
+  const cat = $("#sheet .cats button.on")?.dataset.id;
+  const day = Math.min(31, Math.max(1, parseInt($("#rDay").value, 10) || 1));
+  if (!(amount > 0)) return toast("Введите сумму");
+  if (!cat) return toast("Выберите категорию");
+  const list = [...(S.recurring || [])];
+  const r = { ...(i >= 0 ? list[i] : {}), amount, cat, note: $("#rNote").value.trim(), day };
+  if (i < 0) {
+    // a new one: if its day has already passed this month, ask whether it is to be counted this month too
+    const cur = todayIso().slice(0, 7);
+    r.from = day <= new Date().getDate() && !confirm(`${day}-е число уже было. Добавить «${r.note || catOf(cat).name}» и в этот месяц?\n\nОтмена — начать со следующего месяца.`) ? shiftMonth(cur, 1) : cur;
+    list.push(r);
+  } else list[i] = r;
+  try { await api("/recurring", { recurring: list }); closeSheet(); toast("🔁 Сохранено"); load(); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.delRec = async (i) => {
+  if (!confirm("Больше не добавлять эту трату каждый месяц?")) return;
+  const list = S.recurring.filter((_, j) => j !== i);
+  try { await api("/recurring", { recurring: list }); closeSheet(); load(); } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+
+// ------------------------------------------------------------------ export for Excel / Numbers
+
+// «;» and a decimal comma — what Excel expects with Polish / Russian settings; the BOM keeps the Cyrillic readable
+function csvOf(list) {
+  const q = (v) => { const t = String(v ?? ""); return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [["Дата", "Категория", "Заметка", "Кто", "Сумма, zł"]];
+  for (const t of [...list].sort((a, b) => a.date.localeCompare(b.date))) {
+    rows.push([`${t.date.slice(8, 10)}.${t.date.slice(5, 7)}.${t.date.slice(0, 4)}`, catOf(t.cat).name, t.note, t.who, t.amount.toFixed(2).replace(".", ",")]);
+  }
+  rows.push(["", "", "", "Итого", list.reduce((a, t) => a + t.amount, 0).toFixed(2).replace(".", ",")]);
+  return "\ufeff" + rows.map((r) => r.map(q).join(";")).join("\r\n");
+}
+async function saveFile(name, text) {
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const file = new File([blob], name, { type: "text/csv" });
+  // on the iPhone «Поделиться» lets the file go to «Файлы», Numbers, Excel, mail or a messenger
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+window.exportCsv = () => {
+  if (!S.tx.length) return toast("В этом месяце трат нет");
+  saveFile(`budget-${month}.csv`, csvOf(S.tx));
+};
+window.exportYear = async () => {
+  const y = month.slice(0, 4);
+  const last = y === todayIso().slice(0, 4) ? Number(todayIso().slice(5, 7)) : 12;
+  toast("Собираю год…");
+  let all = [];
+  try {
+    for (let m = 1; m <= last; m++) all = all.concat((await api(`/state?month=${y}-${String(m).padStart(2, "0")}`)).tx);
+  } catch (e) { return toast("Нужен интернет"); }
+  if (!all.length) return toast("За год трат нет");
+  saveFile(`budget-${y}.csv`, csvOf(all));
+};
 
 // ------------------------------------------------------------------ the first start
 
@@ -433,7 +531,8 @@ window.savePlan = async () => {
 
 document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => {
   if (b.dataset.tab === "add") { if (S) openAdd(); return; }
-  tab = b.dataset.tab; if (tab === "history" && b.dataset.tab !== "history") histFilter = null; render();
+  if (b.dataset.tab === "history") histFilter = null;
+  tab = b.dataset.tab; render();
 }));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 const joinParam = new URLSearchParams(location.search).get("join");
