@@ -37,3 +37,13 @@ ol{padding-left:20px;margin-top:6px}ol li{margin:6px 0}
 #toast{position:fixed;left:50%;bottom:110px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:14px;font-weight:600;opacity:0;transition:opacity .25s;pointer-events:none;z-index:20}
 #toast.on{opacity:1}
 .ring{width:132px;height:132px;flex:none}
+/* the list of payments found on a screenshot: compact, one payment = two short lines */
+.shot{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line,rgba(127,127,127,.2))}
+.shot>input[type=checkbox]{width:22px;height:22px;margin:6px 0 0;flex:none}
+.shot input:not([type]),.shot input[id^=shm]{margin:0;padding:6px 8px;font-size:15px;min-width:0}
+.shot select{margin:0;padding:4px 6px;font-size:14px;width:auto;max-width:48%;flex:none}
+.shot .small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.shot>.sp{flex:1;min-width:0}
+.shot input[id^=shm]{flex:1;width:0}
+.shot b{white-space:nowrap}
+.shot .row>.small{flex:1}

@@ -13,7 +13,7 @@ const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const shiftDay = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const shiftMonth = (m, n) => { let [y, mo] = m.split("-").map(Number); mo += n; while (mo < 1) { mo += 12; y--; } while (mo > 12) { mo -= 12; y++; } return `${y}-${String(mo).padStart(2, "0")}`; };
 // the same as on the server: «BIEDRONKA 1234» and «Biedronka» are one shop
-const shopKey = (m) => { const k = String(m || "").toLowerCase().replace(/\s+/g, " ").trim(); return k.replace(/\s*[#№]?\s*\d+$/, "").trim() || k; };
+const shopKey = (m) => { const k = String(m || "").toLowerCase().replace(/…|\.{2,}/g, " ").replace(/\s+/g, " ").trim(); return k.replace(/(^|\s)[#№*]?\d+(?=\s|$)/g, " ").replace(/\s+/g, " ").trim() || k; };
 const monthName = (m) => { const [y, mo] = m.split("-").map(Number); return `${MONTHS[mo - 1][0].toUpperCase() + MONTHS[mo - 1].slice(1)} ${y}`; };
 
 let house = LS.get("house", null);         // {id, key, name}
@@ -138,7 +138,7 @@ window.catHistory = (id) => { tab = "history"; histFilter = id; render(); };
 
 function renderInbox() {
   if (!S.inbox.length) {
-    app.innerHTML = `<h1>Разобрать</h1>${shotButton()}<div class="empty">📥<br><br>Здесь появляются оплаты Apple Pay с ваших телефонов и суммы со скриншотов уведомлений банка.<br>Нажмите на категорию — трата уйдёт в бюджет.<br><br>Apple Pay: Ещё → «Автоматически из Apple Pay».</div>`;
+    app.innerHTML = `<h1>Разобрать</h1>${shotButton()}<div class="empty">📥<br><br>Здесь появляются оплаты Apple Pay с ваших телефонов и траты со скриншотов банка без категории.<br>Нажмите на категорию — трата уйдёт в бюджет.<br><br>Apple Pay: Ещё → «Автоматически из Apple Pay».</div>`;
     return;
   }
   app.innerHTML = `<h1>Разобрать</h1>${shotButton()}<div class="small muted" style="margin-top:4px">Нажмите на категорию — трата уйдёт в бюджет. Магазин запомнится и в следующий раз будет подсказан первым.</div>` +
@@ -167,7 +167,8 @@ window.dropInbox = async (id) => {
 
 // ------------------------------------------------------------------ amounts from a screenshot of the bank's notifications
 
-const shotButton = () => `<button class="btn ghost" onclick="pickShot()">📷 Суммы со скриншота уведомлений</button>
+const shotButton = () => `<button class="btn ghost" onclick="pickShot()">📷 Траты со скриншотов</button>
+  <div class="small muted" style="text-align:center;margin-top:-4px">«Historia transakcji» в приложении Erste или уведомления банка — можно несколько скриншотов сразу</div>
   <input id="shot" type="file" accept="image/*" multiple style="display:none" onchange="readShots(this.files)">`;
 window.pickShot = () => $("#shot").click();
 
@@ -183,67 +184,141 @@ function loadTesseract() {
   return tess;
 }
 
-/** «Płatność kartą 45,20 PLN w BIEDRONKA 123», «-120,00 zł Orlen», «Zapłacono 9,99 PLN, ALLEGRO» → [{amount, merchant}] */
+const PL_MONTHS = ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca", "sierpnia", "września", "października", "listopada", "grudnia"];
+const AMT = String.raw`(\d+(?:[ \u00a0]\d{3})*[.,]\d{2})`;
+const num = (s) => Number(s.replace(/[ \u00a0]/g, "").replace(",", "."));
+// the icon in front of a row comes out of the recognition as «cf», «s]», «=.», «()» — dropped
+const clean = (s) => s.replace(/[…]+|\.{2,}/g, " ").replace(/^(?:\S{1,2}\s+)+(?=\S{3,})/, "").replace(/^[^\p{L}\d]+/u, "").replace(/\s+/g, " ").trim();
+
+// Erste's own categories → ours (only those that exist in this budget are used)
+const BANK_CATS = [
+  [/spożywcz|supermarket|żywność/i, "food"], [/odzież|obuwie/i, "clothes"], [/telefon|internet|\btv\b|prąd|gaz|woda|media|rachunk/i, "bills"],
+  [/czynsz|mieszkan|remont|wyposaż/i, "home"], [/prezent/i, "gifts"], [/bilet|komunikac|transport|taksówk|taxi/i, "transport"],
+  [/paliw|parking|samoch|auto/i, "car"], [/restaurac|kawiar|jedzenie|fast ?food|bary?\b/i, "cafe"], [/zdrow|aptek|lekarz|medyc/i, "health"],
+  [/rozryw|kino|sport|hobby|kultur|podróż/i, "fun"], [/dziec|zabawk|przedszk|żłob/i, "kids"],
+];
+const bankCat = (s) => { const f = BANK_CATS.find(([re]) => re.test(s || "")); return f && S.categories.some((c) => c.id === f[1]) ? f[1] : ""; };
+
+/**
+ * Text read from screenshots → [{amount, merchant, date, bank}].
+ * Erste's «Historia transakcji»: «8 października, czwartek», then rows «JMP S.A. BIEDRONKA 493 -100,25 PLN» with
+ * «Spożywcze i chemia gospodarcza 5 568,31 PLN» under them (the bank's category and the balance). Expenses have «−»,
+ * money coming in has no sign. Notifications: «Płatność kartą 45,20 PLN w BIEDRONKA», «Zapłacono 9,99 zł u ALLEGRO».
+ */
 function amountsIn(text) {
-  const out = [];
   const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
-  const re = /(?:PLN|zł|zl)?\s*([-–+])?\s*(\d{1,3}(?:[ \u00a0.]\d{3})*(?:[.,]\d{2}))\s*(?:PLN|zł|zl)?/i;
+  const signed = new RegExp(String.raw`([-−–+])\s?` + AMT + String.raw`\s*(?:PLN|zł|zl)`, "i");
+  const out = [];
+  let skipped = 0;
+  if (lines.some((l) => /^[-−–]/.test((l.match(signed) || [""])[0]))) {
+    // the bank's list of transactions: a row (name, amount) and under it a line with the balance
+    const amtRe = new RegExp(AMT + String.raw`\s*(?:PLN|zł|zl)`, "i");
+    const now = todayIso();
+    let date = now;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      const d = l.match(new RegExp(String.raw`^(\d{1,2})\s+(` + PL_MONTHS.join("|") + ")", "i"));
+      if (d) {
+        const mo = PL_MONTHS.indexOf(d[2].toLowerCase()) + 1;
+        let y = Number(now.slice(0, 4));
+        if (mo > Number(now.slice(5, 7))) y--;   // a December row looked at in January
+        date = `${y}-${String(mo).padStart(2, "0")}-${String(d[1]).padStart(2, "0")}`;
+        continue;
+      }
+      if (!amtRe.test(l)) continue;
+      const next = lines[i + 1] || "";
+      const hasBalance = amtRe.test(next) && !signed.test(next);
+      if (hasBalance) i++;   // the balance line is not a transaction
+      const m = l.match(signed);
+      if (!m || m[1] === "+") { if (hasBalance) skipped++; continue; }   // money coming in has no «−»
+      const amount = num(m[2]);
+      if (!(amount > 0 && amount < 100000)) continue;
+      out.push({ amount, merchant: clean(l.slice(0, m.index)).slice(0, 40), date, bank: hasBalance ? clean(next.split(new RegExp(AMT))[0]) : "" });
+    }
+    out.skipped = skipped;
+    return out;
+  }
+  // notifications
+  const re = new RegExp(String.raw`(?:PLN|zł|zl)?\s*([-−–+])?\s*` + AMT + String.raw`\s*(?:PLN|zł|zl)?`, "i");
   lines.forEach((l, i) => {
     if (!/(PLN|zł|zl)/i.test(l)) return;
     const m = l.match(re);
-    if (!m) return;
-    if (m[1] === "+") return;   // «+1 000,00 PLN» in the bank's list is money coming in
-    const amount = Number(m[2].replace(/[ \u00a0]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", "."));
+    if (!m || m[1] === "+") return;
+    const amount = num(m[2]);
     if (!(amount > 0 && amount < 100000)) return;
     // incoming money (wpływ, przelew przychodzący, зачисление) is not an expense
-    if (/wpływ|wpłyn|uznanie|przychodz|otrzyma|зачисл|поступ/i.test(l)) return;
+    if (/wpływ|wpłyn|wpłata|uznanie|przychodz|otrzyma|зачисл|поступ/i.test(l)) { skipped++; return; }
     let merchant = (l.split(m[0])[1] || "").replace(/^[\s,.:;-]*(w|u|at|в|na|do)\s+/i, "").replace(/[,.;]+$/, "").trim();
     if (!merchant || merchant.length < 2) merchant = (lines[i + 1] && !/(PLN|zł)/i.test(lines[i + 1]) ? lines[i + 1] : "").slice(0, 40);
-    out.push({ amount, merchant: merchant.slice(0, 40) });
+    out.push({ amount, merchant: merchant.slice(0, 40), date: todayIso(), bank: "" });
   });
+  out.skipped = skipped;
   return out;
 }
 
 window.readShots = async (files) => {
   if (!files || !files.length) return;
   openSheet(`<b>Читаю скриншот…</b><div class="small muted" id="ocrState" style="margin-top:8px">Первый раз загружается распознавание (≈5 МБ), потом быстрее.</div>`);
-  let found = [];
+  let found = [], skipped = 0;
   try {
     const T = await loadTesseract();
     for (const f of files) {
       const { data } = await T.recognize(f, "pol", { logger: (m) => { const e = $("#ocrState"); if (e && m.progress) e.textContent = `${m.status} ${Math.round(m.progress * 100)}%`; } });
-      found = found.concat(amountsIn(data.text));
+      const got = amountsIn(data.text);
+      skipped += got.skipped || 0;
+      found = found.concat(got);
     }
   } catch (e) {
     openSheet(`<b>Не получилось прочитать</b><div class="small muted" style="margin-top:8px">Нужен интернет для первого запуска. Попробуйте ещё раз.</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
     return;
   }
-  const seen = LS.get("shotSeen", {});
-  const day = todayIso();
-  found = found.map((t) => ({ ...t, sig: `${t.amount}|${t.merchant.toLowerCase()}`, dup: !!seen[`${t.amount}|${t.merchant.toLowerCase()}`] }));
-  shotFound = found;
+  // screenshots that overlap (scrolled a little) give the same row twice
+  const uniq = new Map();
+  for (const t of found) uniq.set(`${t.date}|${t.amount}|${shopKey(t.merchant)}`, t);
+  found = [...uniq.values()].sort((a, b) => b.date.localeCompare(a.date));
   if (!found.length) {
-    openSheet(`<b>Сумм не нашёл</b><div class="small muted" style="margin-top:8px">На скриншоте должны быть уведомления банка с суммой в zł / PLN.</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
+    openSheet(`<b>Трат не нашёл</b><div class="small muted" style="margin-top:8px">Подойдёт скриншот «Historia transakcji» из приложения Erste или уведомлений банка с суммой в zł / PLN.${skipped ? ` Поступлений пропущено: ${skipped}.` : ""}</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
     return;
   }
-  openSheet(`<div class="row"><b class="sp">Найдено: ${found.length}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
-    <div class="small muted" style="margin-top:4px">Отметьте траты — они уйдут в «Разобрать». Уже добавленные раньше сняты.</div>
-    ${found.map((t, i) => `<div class="item"><input type="checkbox" id="sh${i}" style="width:24px;height:24px;margin:0" ${t.dup ? "" : "checked"}>
-      <div class="sp"><input id="shm${i}" style="margin:0" value="${esc(t.merchant)}" placeholder="Магазин"></div><div class="a">${fmt(t.amount)}</div></div>`).join("")}
-    <button class="btn" onclick="addShots()">Добавить в «Разобрать»</button>`);
+  // what is already in the budget (an Apple Pay payment the same day with the same amount) is not ticked
+  const have = new Set();
+  const add = (list) => (list || []).forEach((t) => have.add(`${t.date}|${t.amount}`));
+  add(S.tx); add(S.inbox);
+  for (const m of new Set(found.map((t) => t.date.slice(0, 7)))) {
+    if (m === S.month) continue;
+    try { add((await api("/state?month=" + m)).tx); } catch (e) {}
+  }
+  const seen = LS.get("shotSeen", {});
+  found = found.map((t) => {
+    const sig = `${t.date}|${t.amount}|${shopKey(t.merchant)}`;
+    return { ...t, sig, dup: !!seen[sig] || have.has(`${t.date}|${t.amount}`), cat: S.rules[shopKey(t.merchant)] || bankCat(t.bank) };
+  });
+  shotFound = found;
+  const dups = found.filter((t) => t.dup).length;
+  openSheet(`<div class="row"><b class="sp">Найдено трат: ${found.length}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <div class="small muted" style="margin-top:4px">С категорией — сразу в бюджет, без неё — в «Разобрать».${dups ? ` Уже записанные (${dups}) сняты.` : ""}${skipped ? ` Поступления не трата — пропущено ${skipped}.` : ""}</div>
+    ${found.map((t, i) => `<div class="shot"><input type="checkbox" id="sh${i}" ${t.dup ? "" : "checked"}>
+      <div class="sp"><div class="row" style="gap:8px"><input id="shm${i}" class="sp" value="${esc(t.merchant)}" placeholder="Магазин"><b>${fmt(t.amount)}</b></div>
+        <div class="row" style="gap:8px;margin-top:4px"><span class="small muted sp">${t.date.slice(8, 10)}.${t.date.slice(5, 7)}${t.bank ? " · " + esc(t.bank) : ""}</span>
+        <select id="shc${i}">${[`<option value="">📥 Разобрать</option>`, ...S.categories.map((c) => `<option value="${c.id}" ${c.id === t.cat ? "selected" : ""}>${c.emoji} ${esc(c.name)}</option>`)].join("")}</select></div></div></div>`).join("")}
+    <button class="btn" onclick="addShots()">Добавить отмеченные</button>`);
 };
 let shotFound = [];
 window.addShots = async () => {
   const seen = LS.get("shotSeen", {});
-  let n = 0;
+  let n = 0, toInbox = 0;
   for (let i = 0; i < shotFound.length; i++) {
     if (!$("#sh" + i).checked) continue;
     const t = shotFound[i];
     const merchant = $("#shm" + i).value.trim();
-    try { await api("/tx", { amount: t.amount, cat: "", note: merchant, who: me, date: todayIso(), from: "shot" }); n++; seen[t.sig] = Date.now(); } catch (e) {}
+    const cat = $("#shc" + i).value;
+    try {
+      await api("/tx", { amount: t.amount, cat, note: merchant, who: me, date: t.date, from: "shot", merchant: cat ? merchant : "", remember: !!cat });
+      n++; if (!cat) toInbox++; seen[t.sig] = Date.now();
+    } catch (e) {}
   }
   LS.set("shotSeen", seen);
-  closeSheet(); toast(`📥 Добавлено: ${n}`); load();
+  closeSheet(); toast(`Добавлено: ${n}${toInbox ? ` (в «Разобрать»: ${toInbox})` : ""}`); load();
 };
 
 let histFilter = null;

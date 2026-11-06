@@ -121,6 +121,12 @@ export class House extends DurableObject {
       const tx = { id: rand(8), amount, cat: String(body.cat || ""), note: String(body.note || "").slice(0, 80), who: String(body.who || "").slice(0, 20),
         date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), from: body.from ? String(body.from).slice(0, 8) : undefined };
       // an inbox payment sorted into a category: it leaves the inbox; the shop is remembered for the next time
+      if (body.remember && body.merchant && tx.cat) {
+        // sorted by hand on the screenshot sheet: the shop goes there next time too
+        const rules = (await s.get("rules")) || {};
+        rules[shopKey(body.merchant)] = tx.cat;
+        await s.put("rules", rules);
+      }
       if (body.inboxId) {
         const inbox = ((await s.get("inbox")) || []).filter((x) => x.id !== body.inboxId);
         await s.put("inbox", inbox);
@@ -233,8 +239,9 @@ export class House extends DurableObject {
 
 // «BIEDRONKA 1234», «Biedronka  #12» and «biedronka» are one shop for the rules
 function shopKey(m) {
-  const k = String(m || "").toLowerCase().replace(/\s+/g, " ").trim();
-  return k.replace(/\s*[#№]?\s*\d+$/, "").trim() || k;
+  // «PEPCO 110806 POZNAN» and «PEPCO 111057 POZNAN», «BIEDRONKA 1234» and «Biedronka»: the numbers of the shop are left out
+  const k = String(m || "").toLowerCase().replace(/…|\.{2,}/g, " ").replace(/\s+/g, " ").trim();
+  return k.replace(/(^|\s)[#№*]?\d+(?=\s|$)/g, " ").replace(/\s+/g, " ").trim() || k;
 }
 
 // what a Shortcut can show after a payment went into a category: the category's limit, or the month's budget
