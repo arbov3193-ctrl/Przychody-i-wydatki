@@ -9,8 +9,11 @@
 //   POST /api/h/<id>/categories      (X-Key) {categories}
 //   POST /api/h/<id>/plan            (X-Key) {month, income, limits}
 //   POST /api/h/<id>/member          (X-Key) {who}
+//   POST /api/h/<id>/settings        (X-Key) {autoSort}   known shops go straight into their category
+//   POST /api/h/<id>/rekey           (X-Key)              → {key}   a new key; the old links and Shortcuts stop working
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
+//                                    → {ok, amount, cat?, text, alert}   text: «🛒 Продукты 45,20 zł · осталось 300 zł» for a notification
 //   GET  /api/in/<id>/<key>          → {inbox, inboxSum, spent, budget, left, text}   for a reminder / widget Shortcut
 import { DurableObject } from "cloudflare:workers";
 
@@ -73,6 +76,7 @@ export class House extends DurableObject {
         inbox: (await s.get("inbox")) || [],
         rules: (await s.get("rules")) || {},
         recurring: (await s.get("recurring")) || [],
+        settings: { autoSort: true, ...((await s.get("settings")) || {}) },
         month,
       });
     }
@@ -94,11 +98,22 @@ export class House extends DurableObject {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
-      const item = { id: rand(8), amount, merchant: String(body.merchant || "").slice(0, 60), who: String(body.who || "").slice(0, 20), date: today(), time: Date.now() };
+      const item = { id: rand(8), amount, merchant: String(body.merchant || "").trim().slice(0, 60), who: String(body.who || "").slice(0, 20), date: today(), time: Date.now() };
+      // a shop sorted before goes straight into its category (unless switched off in «Ещё»)
+      const settings = { autoSort: true, ...((await s.get("settings")) || {}) };
+      const cats = (await s.get("categories")) || DEFAULT_CATEGORIES;
+      const cat = settings.autoSort && item.merchant ? ((await s.get("rules")) || {})[shopKey(item.merchant)] : "";
+      if (cat && cats.some((c) => c.id === cat)) {
+        const k = `tx:${item.date.slice(0, 7)}`;
+        const list = (await s.get(k)) || [];
+        list.unshift({ id: item.id, amount, cat, note: item.merchant, who: item.who, date: item.date, time: item.time, from: "pay", auto: true });
+        await s.put(k, list);
+        return json({ ok: true, amount, cat, ...(await catNews(s, cats, cat, item.date.slice(0, 7), amount)) });
+      }
       const inbox = (await s.get("inbox")) || [];
       inbox.unshift(item);
       await s.put("inbox", inbox.slice(0, 300));
-      return json({ ok: true, amount });
+      return json({ ok: true, amount, text: `📥 ${zl(amount)}${item.merchant ? " · " + item.merchant : ""} — в «Разобрать»`, alert: false });
     }
     if (url.pathname === "/tx" && request.method === "POST") {
       const amount = parseAmount(body.amount);
@@ -111,7 +126,7 @@ export class House extends DurableObject {
         await s.put("inbox", inbox);
         if (body.merchant && tx.cat) {
           const rules = (await s.get("rules")) || {};
-          rules[String(body.merchant).toLowerCase()] = tx.cat;
+          rules[shopKey(body.merchant)] = tx.cat;
           await s.put("rules", rules);
         }
       }
@@ -142,7 +157,16 @@ export class House extends DurableObject {
       if (body.delete) list = list.filter((t) => t.id !== edit[1]);
       else {
         const t = list[i];
-        if (body.cat !== undefined) t.cat = String(body.cat);
+        if (body.cat !== undefined && body.cat !== t.cat) {
+          t.cat = String(body.cat);
+          // a payment moved to another category: next time the shop goes there
+          if (t.from === "pay" && t.note && t.cat) {
+            const rules = (await s.get("rules")) || {};
+            rules[shopKey(t.note)] = t.cat;
+            await s.put("rules", rules);
+          }
+          delete t.auto;
+        }
         if (body.note !== undefined) t.note = String(body.note).slice(0, 80);
         if (body.amount !== undefined && parseAmount(body.amount)) t.amount = parseAmount(body.amount);
         if (body.date && /^\d{4}-\d{2}-\d{2}$/.test(body.date) && body.date.slice(0, 7) !== month) {
@@ -173,6 +197,17 @@ export class House extends DurableObject {
       await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits });
       return json({ ok: true });
     }
+    if (url.pathname === "/settings") {
+      const settings = { autoSort: true, ...((await s.get("settings")) || {}) };
+      if (typeof body.autoSort === "boolean") settings.autoSort = body.autoSort;
+      await s.put("settings", settings);
+      return json({ ok: true, settings });
+    }
+    if (url.pathname === "/rekey" && request.method === "POST") {
+      const k = rand(16);
+      await s.put("key", k);
+      return json({ ok: true, key: k });
+    }
     if (url.pathname === "/recurring") {
       const cur = today().slice(0, 7);
       const list = (Array.isArray(body.recurring) ? body.recurring : []).slice(0, 40).map((r) => ({
@@ -194,6 +229,31 @@ export class House extends DurableObject {
     }
     return json({ error: "not found" }, 404);
   }
+}
+
+// «BIEDRONKA 1234», «Biedronka  #12» and «biedronka» are one shop for the rules
+function shopKey(m) {
+  const k = String(m || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return k.replace(/\s*[#№]?\s*\d+$/, "").trim() || k;
+}
+
+// what a Shortcut can show after a payment went into a category: the category's limit, or the month's budget
+async function catNews(s, cats, cat, month, amount) {
+  const c = cats.find((x) => x.id === cat) || { emoji: "📦", name: "" };
+  const tx = (await s.get(`tx:${month}`)) || [];
+  const plan = (await s.get(`plan:${month}`)) || (await s.get(`plan:${prevMonth(month)}`)) || { income: 0, limits: {} };
+  const lim = (plan.limits || {})[cat] || 0;
+  let tail = "", alert = false;
+  if (lim) {
+    const sp = total(tx.filter((t) => t.cat === cat));
+    alert = sp / lim > 0.85;
+    tail = sp <= lim ? ` · осталось ${zl(Math.round((lim - sp) * 100) / 100)} из ${zl(lim)}` : ` · ⚠️ перерасход ${zl(Math.round((sp - lim) * 100) / 100)}`;
+    if (alert && sp <= lim) tail = " · ⚠️" + tail.slice(2);
+  } else {
+    const budget = plan.income || Object.values(plan.limits || {}).reduce((a, b) => a + b, 0);
+    if (budget) { const left = Math.round((budget - total(tx)) * 100) / 100; alert = left < 0; tail = left >= 0 ? ` · в месяце осталось ${zl(left)}` : ` · ⚠️ перерасход месяца ${zl(-left)}`; }
+  }
+  return { text: `${c.emoji} ${c.name} ${zl(amount)}${tail}`, alert };
 }
 
 // Monthly expenses (rent, phone, subscriptions) are written into the month on their day, once:

@@ -12,6 +12,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const shiftDay = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const shiftMonth = (m, n) => { let [y, mo] = m.split("-").map(Number); mo += n; while (mo < 1) { mo += 12; y--; } while (mo > 12) { mo -= 12; y++; } return `${y}-${String(mo).padStart(2, "0")}`; };
+// the same as on the server: «BIEDRONKA 1234» and «Biedronka» are one shop
+const shopKey = (m) => { const k = String(m || "").toLowerCase().replace(/\s+/g, " ").trim(); return k.replace(/\s*[#№]?\s*\d+$/, "").trim() || k; };
 const monthName = (m) => { const [y, mo] = m.split("-").map(Number); return `${MONTHS[mo - 1][0].toUpperCase() + MONTHS[mo - 1].slice(1)} ${y}`; };
 
 let house = LS.get("house", null);         // {id, key, name}
@@ -48,8 +50,18 @@ async function load() {
     LS.set("cache:" + month, S);
   } catch (e) {
     S = LS.get("cache:" + month, null);
-    if (String(e.message) === "key") { toast("Код семьи не подходит"); }
+    if (String(e.message) === "key") return askNewKey();
   }
+  render();
+}
+
+// the key was changed on the other phone: this one needs the new link
+function askNewKey() {
+  if ($("#sheet").classList.contains("on") && $("#newCode")) return;   // already asking (the app reloads every minute)
+  openSheet(`<b>Ключ бюджета сменили</b>
+    <div class="small muted" style="margin-top:6px">Похоже, на другом телефоне выдали новый ключ. Попросите новую ссылку («Ещё» → «Отправить ссылку») и вставьте её сюда.</div>
+    <input id="newCode" placeholder="Ссылка или код">
+    <button class="btn" onclick="closeSheet();joinBy($('#newCode').value, '')">Подключиться</button>`);
   render();
 }
 
@@ -131,7 +143,7 @@ function renderInbox() {
   }
   app.innerHTML = `<h1>Разобрать</h1>${shotButton()}<div class="small muted" style="margin-top:4px">Нажмите на категорию — трата уйдёт в бюджет. Магазин запомнится и в следующий раз будет подсказан первым.</div>` +
     S.inbox.map((t) => {
-      const sug = S.rules[(t.merchant || "").toLowerCase()];
+      const sug = S.rules[shopKey(t.merchant)] || S.rules[(t.merchant || "").toLowerCase()];
       const cats = [...S.categories].sort((a, b) => (a.id === sug ? -1 : b.id === sug ? 1 : 0));
       return `<div class="card"><div class="row"><div class="sp"><div class="a big" style="font-size:26px">${fmt(t.amount)}</div>
         <div class="muted small">${esc(t.merchant || "без названия")} · ${esc(t.who || "")} · ${t.date.slice(8, 10)}.${t.date.slice(5, 7)}</div></div>
@@ -175,12 +187,13 @@ function loadTesseract() {
 function amountsIn(text) {
   const out = [];
   const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
-  const re = /(?:PLN|zł|zl)?\s*[-–]?\s*(\d{1,3}(?:[ \u00a0.]\d{3})*(?:[.,]\d{2}))\s*(?:PLN|zł|zl)?/i;
+  const re = /(?:PLN|zł|zl)?\s*([-–+])?\s*(\d{1,3}(?:[ \u00a0.]\d{3})*(?:[.,]\d{2}))\s*(?:PLN|zł|zl)?/i;
   lines.forEach((l, i) => {
     if (!/(PLN|zł|zl)/i.test(l)) return;
     const m = l.match(re);
     if (!m) return;
-    const amount = Number(m[1].replace(/[ \u00a0]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", "."));
+    if (m[1] === "+") return;   // «+1 000,00 PLN» in the bank's list is money coming in
+    const amount = Number(m[2].replace(/[ \u00a0]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", "."));
     if (!(amount > 0 && amount < 100000)) return;
     // incoming money (wpływ, przelew przychodzący, зачисление) is not an expense
     if (/wpływ|wpłyn|uznanie|przychodz|otrzyma|зачисл|поступ/i.test(l)) return;
@@ -234,23 +247,30 @@ window.addShots = async () => {
 };
 
 let histFilter = null;
+let histQuery = "";
 function renderHistory() {
-  const list = S.tx.filter((t) => !histFilter || t.cat === histFilter).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
   const queue = LS.get("queue", []);
-  let html = monthHeader();
+  let html = monthHeader() + `<input id="hq" type="search" placeholder="🔍 Поиск: магазин, заметка, сумма" value="${esc(histQuery)}" oninput="histQuery=this.value;$('#hlist').innerHTML=histList()">`;
   if (histFilter) html += `<div class="chips"><button onclick="histFilter=null;render()">${catOf(histFilter).emoji} ${esc(catOf(histFilter).name)} ✕</button></div>`;
   if (queue.length) html += `<div class="card small">⏳ Ждут интернета: ${queue.length} (${fmt(queue.reduce((a, t) => a + Number(t.amount), 0))})</div>`;
-  if (!list.length) { app.innerHTML = html + `<div class="empty">Трат нет</div>`; return; }
+  app.innerHTML = html + `<div id="hlist">${histList()}</div>`;
+}
+// only the list is redrawn while typing in the search, so the iPhone keyboard stays open
+function histList() {
+  const q = histQuery.trim().toLowerCase().replace(",", ".");
+  const hit = (t) => !q || [t.note, catOf(t.cat).name, t.who, String(t.amount)].some((v) => String(v || "").toLowerCase().includes(q));
+  const list = S.tx.filter((t) => (!histFilter || t.cat === histFilter) && hit(t)).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  if (!list.length) return `<div class="empty">${q ? "Ничего не нашлось" : "Трат нет"}</div>`;
   let day = "";
-  html += `<div class="card" style="padding-top:4px">`;
+  let html = `<div class="card" style="padding-top:4px">`;
   for (const t of list) {
     if (t.date !== day) { day = t.date; html += `<div class="day">${dayName(day)}</div>`; }
     const c = catOf(t.cat);
     html += `<div class="item" onclick="openEdit('${t.id}')"><div class="e">${c.emoji}</div><div class="sp"><div>${esc(t.note || c.name)}</div>
-      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" : t.from === "rec" ? " · 🔁 каждый месяц" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
+      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" + (t.auto ? " · авто" : "") : t.from === "rec" ? " · 🔁 каждый месяц" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
   }
-  app.innerHTML = html + `</div><div class="small muted" style="text-align:center;margin-top:10px">Итого: ${fmt(list.reduce((a, t) => a + t.amount, 0))}</div>
-    <button class="btn ghost" onclick="exportCsv()">📤 Выгрузить ${MONTHS[Number(month.slice(5)) - 1]} в Excel (CSV)</button>`;
+  return html + `</div><div class="small muted" style="text-align:center;margin-top:10px">Итого: ${fmt(list.reduce((a, t) => a + t.amount, 0))}</div>
+    ${q || histFilter ? "" : `<button class="btn ghost" onclick="exportCsv()">📤 Выгрузить ${MONTHS[Number(month.slice(5)) - 1]} в Excel (CSV)</button>`}`;
 }
 function dayName(iso) {
   const t = todayIso();
@@ -281,11 +301,17 @@ function renderSettings() {
         <li>Выберите <b>«Транзакция»</b> → ваши карты (Erste) → «Запускать сразу»</li>
         <li>Действие <b>«Получить содержимое URL»</b>:<br>URL — ссылка ниже, Метод — <b>POST</b>, Тело запроса — <b>JSON</b></li>
         <li>Поля JSON: <b>amount</b> → «Сумма» (из транзакции), <b>merchant</b> → «Продавец», <b>who</b> → <b>${esc(me || "ваше имя")}</b></li>
-        <li>Готово. Оплатите что-нибудь Apple Pay — трата появится в «Разобрать».</li>
+        <li>Готово. Оплатите что-нибудь Apple Pay — трата появится в «Разобрать» или сразу в категории, если магазин знакомый.</li>
+        <li>По желанию: ниже добавьте <b>«Получить значение словаря»</b> → ключ <b>text</b> и <b>«Показать уведомление»</b> с этим значением — после оплаты придёт «🛒 Продукты 45,20 zł · осталось 300 zł» (⚠️, если лимит почти кончился).</li>
       </ol>
       <div class="code">${esc(hook)}</div>
       <button class="btn ghost" onclick="copy('${esc(hook)}')">📋 Скопировать ссылку для «Команд»</button>
       <div class="muted" style="margin-top:8px">BLIK, переводы и оплата пластиковой картой сюда не попадают — их добавляйте кнопкой ＋.</div>
+    </div>
+    <h2>Разбор оплат</h2><div class="card">
+      <div class="row" style="gap:12px"><span class="sp"><b>Знакомые магазины — сразу в категорию</b><div class="small muted">Оплата в магазине, который вы уже раскладывали, не ждёт в «Разобрать». Если категория не та — поправьте в «Истории», магазин запомнится заново.</div></span>
+        <input type="checkbox" style="width:26px;height:26px;margin:0" ${S.settings?.autoSort !== false ? "checked" : ""} onchange="setAutoSort(this.checked)"></div>
+      ${Object.keys(S.rules || {}).length ? `<div class="small muted" style="margin-top:8px">Запомнено магазинов: ${Object.keys(S.rules).length}</div>` : ""}
     </div>
     <h2>Каждый месяц</h2><div class="card">
       <div class="small muted">Аренда, связь, подписки — сами добавятся в бюджет в свой день месяца.</div>
@@ -315,8 +341,24 @@ function renderSettings() {
       <button class="btn ghost" onclick="catAdd()">＋ Категория</button>
     </div>
     <h2>Установка</h2><div class="card small">На iPhone: Safari → кнопка «Поделиться» → <b>«На экран Домой»</b>. Бюджет откроется как обычное приложение.</div>
+    <h2>Безопасность</h2><div class="card small">
+      Ключ бюджета есть в ссылке для жены и в ссылке «Команд». Если ссылка попала к чужим людям — выдайте новый ключ: старые ссылки перестанут работать.
+      <button class="btn ghost" onclick="rekey()">🔑 Выдать новый ключ</button>
+    </div>
     <button class="btn red" style="margin-top:24px" onclick="leave()">Отключить этот телефон</button>`;
 }
+window.setAutoSort = async (v) => {
+  try { const r = await api("/settings", { autoSort: v }); S.settings = r.settings; toast(v ? "Знакомые магазины — сразу в категорию" : "Все оплаты — в «Разобрать»"); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); render(); }
+};
+window.rekey = async () => {
+  if (!confirm("Выдать новый ключ?\n\nПосле этого нужно:\n• отправить жене новую ссылку;\n• заменить ссылку в «Командах» на обоих телефонах.\n\nДо этого оплаты Apple Pay не будут приходить.")) return;
+  try {
+    const r = await api("/rekey", {});
+    house = { ...house, key: r.key }; LS.set("house", house);
+    toast("🔑 Новый ключ выдан"); render();
+  } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
 window.share = async (u) => { try { await navigator.share({ title: "Семейный бюджет", url: u }); } catch (e) { copy(u); } };
 window.copy = async (t) => { try { await navigator.clipboard.writeText(t); toast("Скопировано"); } catch (e) { prompt("Скопируйте:", t); } };
 window.setMe = (w) => { me = w; LS.set("me", w); render(); };
