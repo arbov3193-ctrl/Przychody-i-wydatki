@@ -60,3 +60,6 @@ ol{padding-left:20px;margin-top:6px}ol li{margin:6px 0}
 textarea{width:100%;font:inherit;font-size:17px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);margin-top:10px;resize:vertical}
 /* money owed to us: next to the balance, in brackets — expected, not on the account yet */
 .owed{font-size:15px;font-weight:700;color:var(--green);margin-top:2px}
+/* «↪ на след. месяц» under a category in «Суммы» */
+label.keep{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:12px;font-weight:500;color:var(--muted)}
+label.keep input{width:18px;height:18px;margin:0;padding:0;flex:none}

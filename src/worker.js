@@ -7,7 +7,7 @@
 //   POST /api/h/<id>/tx              (X-Key) {amount, cat, note, who, date}  an expense (no cat → inbox)
 //   POST /api/h/<id>/tx/<txId>       (X-Key) {cat?, amount?, note?, date?, delete?}
 //   POST /api/h/<id>/categories      (X-Key) {categories}
-//   POST /api/h/<id>/plan            (X-Key) {month, income, limits}
+//   POST /api/h/<id>/plan            (X-Key) {month, income, limits, keep: {cat: false}}   keep false — not carried to the next month
 //   POST /api/h/<id>/member          (X-Key) {who}
 //   POST /api/h/<id>/settings        (X-Key) {autoSort}   known shops go straight into their category
 //   POST /api/h/<id>/rekey           (X-Key)              → {key}   a new key; the old links and Shortcuts stop working
@@ -80,7 +80,7 @@ export class House extends DurableObject {
         name: await s.get("name"),
         members: (await s.get("members")) || [],
         categories: (await s.get("categories")) || DEFAULT_CATEGORIES,
-        plan: (await s.get(`plan:${month}`)) || (await s.get(`plan:${prevMonth(month)}`)) || { income: 0, limits: {} },
+        plan: await planOf(s, month),
         planIsOwn: !!(await s.get(`plan:${month}`)),
         tx: (await s.get(`tx:${month}`)) || [],
         prevTotal: total((await s.get(`tx:${prevMonth(month)}`)) || []),
@@ -101,7 +101,7 @@ export class House extends DurableObject {
       await applyRecurring(s, month);
       const inbox = (await s.get("inbox")) || [];
       const tx = (await s.get(`tx:${month}`)) || [];
-      const plan = (await s.get(`plan:${month}`)) || (await s.get(`plan:${prevMonth(month)}`)) || { income: 0, limits: {} };
+      const plan = await planOf(s, month);
       const budget = plan.income || Object.values(plan.limits || {}).reduce((a, b) => a + b, 0);
       const spent = total(tx);
       const left = Math.round((budget - spent) * 100) / 100;
@@ -216,7 +216,10 @@ export class House extends DurableObject {
       const month = monthOf(body.month);
       const limits = {};
       for (const [k, v] of Object.entries(body.limits || {})) { const n = parseAmount(v); if (n) limits[String(k).slice(0, 12)] = n; }
-      await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits });
+      // keep: which categories go on to the next month (a one-off one — a birthday, a repair — stays in its month)
+      const keep = {};
+      for (const [k, v] of Object.entries(body.keep || {})) if (v === false) keep[String(k).slice(0, 12)] = false;
+      await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits, keep });
       return json({ ok: true });
     }
     if (url.pathname === "/income" && request.method === "POST") {
@@ -308,6 +311,16 @@ export class House extends DurableObject {
   }
 }
 
+// The month's plan; a month without its own starts from the one before, with only the categories ticked «на след. месяц»
+async function planOf(s, month) {
+  const own = await s.get(`plan:${month}`);
+  if (own) return { keep: {}, ...own };
+  const prev = await s.get(`plan:${prevMonth(month)}`);
+  if (!prev) return { income: 0, limits: {}, keep: {} };
+  const keep = prev.keep || {};
+  return { income: prev.income || 0, limits: Object.fromEntries(Object.entries(prev.limits || {}).filter(([k]) => keep[k] !== false)), keep: {} };
+}
+
 // The money the family has: «сейчас на счёте» as set by hand (or 0 from the start), plus every income and minus
 // every expense recorded after that moment — the sorted ones and those still waiting in «Разобрать».
 // «Необходимо» is what is still to be given back (debts «we» owe); «свободно» is what is left after that.
@@ -337,7 +350,7 @@ function shopKey(m) {
 async function catNews(s, cats, cat, month, amount) {
   const c = cats.find((x) => x.id === cat) || { emoji: "📦", name: "" };
   const tx = (await s.get(`tx:${month}`)) || [];
-  const plan = (await s.get(`plan:${month}`)) || (await s.get(`plan:${prevMonth(month)}`)) || { income: 0, limits: {} };
+  const plan = await planOf(s, month);
   const lim = (plan.limits || {})[cat] || 0;
   let tail = "", alert = false;
   if (lim) {

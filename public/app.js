@@ -762,19 +762,37 @@ window.saveEdit = async (id) => {
 };
 window.delTx = async (id) => { if (!confirm("Удалить трату?")) return; await api(`/tx/${id}?month=${month}`, { delete: true }); closeSheet(); load(); };
 
-window.openPlan = () => {
-  const lim = S.plan.limits || {};
+// draft: what was typed before «＋ Категория» re-drew the sheet
+window.openPlan = (draft) => {
+  const lim = draft ? draft.limits : S.plan.limits || {}, keep = draft ? draft.keep : S.plan.keep || {};
   const { by } = sums();
-  openSheet(`<div class="row"><b class="sp">Бюджет на ${monthName(month).toLowerCase()}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
-    <label>Сколько есть на месяц (доход), zł${(S.inc || []).length ? ` — уже пришло ${fmt0(S.inc.reduce((a, t) => a + t.amount, 0))}` : ""}</label><input id="pIncome" inputmode="decimal" value="${S.plan.income || ""}" oninput="planLeft()">
+  openSheet(`<div class="row"><b class="sp">Суммы на ${monthName(month).toLowerCase()}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <label>Сколько есть на месяц (доход), zł${(S.inc || []).length ? ` — уже пришло ${fmt0(S.inc.reduce((a, t) => a + t.amount, 0))}` : ""}</label><input id="pIncome" inputmode="decimal" value="${draft ? esc(draft.income) : S.plan.income || ""}" oninput="planLeft()">
     <div id="pLeft" class="small" style="margin-top:6px"></div>
-    <h2>Лимиты по категориям</h2>
+    <h2>Сколько надо по категориям</h2>
+    <div class="small muted">Галочка ↪ — сумма перейдёт на следующий месяц. Снимите для разового: подарок, ремонт, поездка.</div>
     ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}</div>
-      <div class="small muted">${by[c.id] ? "потрачено " + fmt0(by[c.id]) : ""}</div></div>
-      <input class="lim" data-id="${c.id}" inputmode="decimal" style="width:110px;margin:0;text-align:right" placeholder="0" value="${lim[c.id] || ""}" oninput="planLeft()"></div>`).join("")}
-    <button class="btn" onclick="savePlan()">Сохранить бюджет</button>
-    <div class="small muted" style="margin-top:8px">Следующий месяц начнётся с этих же лимитов — их можно поменять.</div>`);
+      <label class="keep"><input type="checkbox" class="keepc" data-id="${c.id}" ${keep[c.id] === false ? "" : "checked"}> ↪ на след. месяц</label>
+      ${by[c.id] ? `<div class="small muted">потрачено ${fmt0(by[c.id])}</div>` : ""}</div>
+      <input class="lim" data-id="${c.id}" inputmode="decimal" style="width:100px;margin:0;text-align:right" placeholder="0" value="${lim[c.id] || ""}" oninput="planLeft()"></div>`).join("")}
+    <button class="btn ghost" onclick="planCatAdd()">＋ Категория</button>
+    <button class="btn" onclick="savePlan()">Сохранить</button>`);
   planLeft();
+};
+function planDraft() {
+  const limits = {}, keep = {};
+  document.querySelectorAll(".lim").forEach((e) => { if (e.value) limits[e.dataset.id] = e.value; });
+  document.querySelectorAll(".keepc").forEach((e) => { if (!e.checked) keep[e.dataset.id] = false; });
+  return { income: $("#pIncome").value, limits, keep };
+}
+window.planCatAdd = async () => {
+  const draft = planDraft();
+  const raw = (prompt("Название категории (можно с эмодзи в начале, например «🎂 День рождения»):") || "").trim();
+  if (!raw) return;
+  const m = raw.match(/^(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)\s*(.*)$/u);
+  const c = { id: Math.random().toString(36).slice(2, 8), emoji: m ? m[1] : "🏷", name: (m ? m[2] : raw).slice(0, 24) || raw.slice(0, 24) };
+  try { await api("/categories", { categories: [...S.categories, c] }); S.categories.push(c); openPlan(draft); setTimeout(() => document.querySelector(`.lim[data-id="${c.id}"]`)?.focus(), 50); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
 };
 window.planLeft = () => {
   const inc = Number(String($("#pIncome").value).replace(",", ".")) || 0;
@@ -783,10 +801,9 @@ window.planLeft = () => {
   $("#pLeft").innerHTML = inc ? (left >= 0 ? `Распределено ${fmt0(sum)} · <b>свободно ${fmt0(left)}</b>` : `<span style="color:var(--red)">Распределено больше дохода на ${fmt0(-left)}</span>`) : `Распределено ${fmt0(sum)}`;
 };
 window.savePlan = async () => {
-  const limits = {};
-  document.querySelectorAll(".lim").forEach((e) => { if (e.value) limits[e.dataset.id] = e.value; });
-  await api("/plan", { month, income: $("#pIncome").value, limits });
-  closeSheet(); toast("Бюджет сохранён"); load();
+  const d = planDraft();
+  try { await api("/plan", { month, income: d.income, limits: d.limits, keep: d.keep }); closeSheet(); toast("Сохранено"); load(); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
 };
 
 // ------------------------------------------------------------------ start
