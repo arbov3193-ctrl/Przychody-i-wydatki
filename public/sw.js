@@ -1,5 +1,5 @@
 // The app shell is kept on the phone, so the budget opens without internet (data comes from the last visit).
-const CACHE = "budget-v13";
+const CACHE = "budget-v14";
 const SHELL = ["/", "/index.html", "/app.js", "/style.css", "/manifest.webmanifest", "/icon-192.png", "/icon-180.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))); self.clients.claim(); });

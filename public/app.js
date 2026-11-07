@@ -20,11 +20,26 @@ let house = LS.get("house", null);         // {id, key, name}
 let me = LS.get("me", "");                 // this phone's person
 let month = todayIso().slice(0, 7);
 let tab = "month";
-let S = null;                              // the server state
+let S = null;                              // what the screens show
+let SF = null;                             // the server state as it came
+// The full phone looks like the wife's unless «secret» is on: 5 quick taps on the month's name; it goes off as soon as
+// the app leaves the screen. Then the 🙈 categories, their expenses and sums, and the real balance are shown.
+let secret = false;
+function publicOf(F) {
+  const hid = new Set(F.categories.filter((c) => c.hidden).map((c) => c.id));
+  if (!hid.size) return { ...F, balance: F.balanceShared || F.balance };
+  const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !hid.has(k)));
+  return { ...F, categories: F.categories.filter((c) => !c.hidden), tx: F.tx.filter((t) => !hid.has(t.cat)),
+    plan: { ...F.plan, limits: strip(F.plan.limits), keep: strip(F.plan.keep) }, notes: strip(F.notes), recurring: (F.recurring || []).filter((r) => !hid.has(r.cat)),
+    rules: Object.fromEntries(Object.entries(F.rules || {}).filter(([, c]) => !hid.has(c))), balance: F.balanceShared || F.balance };
+}
+function setState(F) { SF = F; S = !F || F.role === "partner" || secret ? F : publicOf(F); }
+const everyday = () => S && SF && S !== SF;   // lists sent to the server lack the hidden items — the server keeps them
 
 function toast(t) { const e = $("#toast"); e.textContent = t; e.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove("on"), 2200); }
 
 async function api(path, body, method) {
+  if (body && everyday()) body = { ...body, keepHidden: true };
   const r = await fetch("/api/h/" + house.id + path, {
     method: method || (body ? "POST" : "GET"), headers: { "Content-Type": "application/json", "X-Key": house.key }, body: body ? JSON.stringify(body) : undefined,
   });
@@ -46,10 +61,10 @@ window.addEventListener("online", flushQueue);
 
 async function load() {
   try {
-    S = await api("/state?month=" + month);
-    LS.set("cache:" + month, S);
+    setState(await api("/state?month=" + month));
+    LS.set("cache:" + month, SF);
   } catch (e) {
-    S = LS.get("cache:" + month, null);
+    setState(LS.get("cache:" + month, null));
     if (String(e.message) === "key") return askNewKey();
   }
   render();
@@ -94,9 +109,18 @@ function render() {
 }
 
 function monthHeader() {
-  return `<div class="month"><button onclick="go(-1)">‹</button><h1>${monthName(month)}</h1><button onclick="go(1)">›</button></div>`;
+  return `<div class="month"><button onclick="go(-1)">‹</button><h1 onclick="secretTap()" class="${secret ? "sec" : ""}">${monthName(month)}</h1><button onclick="go(1)">›</button></div>`;
 }
-window.go = (n) => { month = shiftMonth(month, n); S = LS.get("cache:" + month, S && { ...S, tx: [] }); render(); load(); };
+let taps = [];
+window.secretTap = () => {
+  if (!SF || SF.role === "partner") return;
+  const now = Date.now();
+  taps = taps.filter((t) => now - t < 2500).concat(now);
+  if (taps.length < 5) return;
+  taps = []; secret = !secret; setState(SF); render();
+};
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && secret) { secret = false; setState(SF); render(); } });
+window.go = (n) => { month = shiftMonth(month, n); setState(LS.get("cache:" + month, SF && { ...SF, tx: [] })); render(); load(); };
 
 // ------------------------------------------------------------------ balance: what the family has, what has to be given back
 
@@ -514,7 +538,7 @@ function renderSettings() {
       <label>Этот телефон — кто?</label>
       <div class="chips">${S.members.map((w) => `<button class="${w === me ? "sug" : ""}" onclick="setMe('${esc(w)}')">👤 ${esc(w)}</button>`).join("")}<button onclick="addMember()">＋ добавить</button></div>
       ${full ? `<label>Подключить телефон жены</label>
-      <div class="small muted">На её iPhone: Safari → эта ссылка → «Поделиться» → «На экран Домой»; открыть с иконки и вставить ссылку. Категории со значком 🙈 она не увидит.</div>
+      <div class="small muted">На её iPhone: Safari → эта ссылка → «Поделиться» → «На экран Домой»; открыть с иконки и вставить ссылку.</div>
       <div class="code">${esc(join)}</div>
       <button class="btn ghost" onclick="share('${esc(join)}')">📤 Отправить ссылку жене</button>
       <button class="btn ghost" onclick="renewPartner()">🔄 Новая ссылка для жены</button>` : ""}
@@ -561,10 +585,10 @@ function renderSettings() {
       <button class="btn ghost" onclick="exportYear()">📤 Весь ${month.slice(0, 4)} год (CSV)</button>
     </div>
     <h2>Категории</h2><div class="card">
-      ${full ? `<div class="small muted" style="margin-bottom:6px">🙈 — скрыть от жены: на её телефоне не будет ни категории, ни трат по ней, ни суммы; её баланс меньше на отложенное в ней.</div>` : ""}
+      ${full && secret ? `<div class="small muted" style="margin-bottom:6px">🙈 — скрыть от жены: на её телефоне не будет ни категории, ни трат по ней, ни суммы; её баланс меньше на отложенное в ней.</div>` : ""}
       ${S.categories.map((c, i) => `<div class="cat"><input style="width:56px;text-align:center;margin:0" value="${esc(c.emoji)}" onchange="catEdit(${i},'emoji',this.value)">
         <input style="margin:0" value="${esc(c.name)}" onchange="catEdit(${i},'name',this.value)">
-        ${full ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="catHide(${i})" aria-label="Скрыть от жены">🙈</button>` : ""}
+        ${full && secret ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="catHide(${i})" aria-label="Скрыть от жены">🙈</button>` : ""}
         <button class="btn ghost" style="width:auto;margin:0;padding:10px" onclick="catDel(${i})">✕</button></div>`).join("")}
       <button class="btn ghost" onclick="catAdd()">＋ Категория</button>
     </div>
@@ -613,7 +637,7 @@ window.catAdd = async () => {
   const n = (prompt("Название категории:") || "").trim(); if (!n) return;
   S.categories.push({ id: Math.random().toString(36).slice(2, 8), emoji: "🏷", name: n }); await api("/categories", { categories: S.categories }); render();
 };
-window.leave = () => { if (!confirm("Отключить телефон от семейного бюджета? Данные останутся на сервере.")) return; localStorage.clear(); house = null; S = null; render(); };
+window.leave = () => { if (!confirm("Отключить телефон от семейного бюджета? Данные останутся на сервере.")) return; localStorage.clear(); house = null; setState(null); render(); };
 
 // ------------------------------------------------------------------ monthly expenses
 

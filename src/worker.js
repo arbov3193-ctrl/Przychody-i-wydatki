@@ -76,6 +76,8 @@ export class House extends DurableObject {
     const hidden = new Set(allCats.filter((c) => c.hidden).map((c) => c.id));
     const seen = (t) => !P || !hidden.has(t.cat);           // an expense the partner may see
     const seenIn = (t) => !P || !t.priv;                     // an unsorted payment the partner may see
+    // the full phone in its everyday look sends lists without the hidden items: they are kept, as for the partner
+    const M = P || body.keepHidden === true;
     const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !P || !hidden.has(k)));
 
     if (url.pathname === "/state") {
@@ -105,6 +107,7 @@ export class House extends DurableObject {
         settings: { autoSort: true, ...((await s.get("settings")) || {}) },
         inc: (await s.get(`inc:${month}`)) || [],
         balance: await balanceOf(s, P ? hidden : null),
+        balanceShared: P ? undefined : await balanceOf(s, hidden),   // what the wife sees — the full phone's everyday look
         debts: (await s.get("debts")) || [],
         notes: strip((await s.get("notes")) || {}),
         month,
@@ -225,10 +228,10 @@ export class House extends DurableObject {
     if (url.pathname === "/categories") {
       const cats = (Array.isArray(body.categories) ? body.categories : []).slice(0, 40)
         .map((c) => ({ id: String(c.id || rand(6)).slice(0, 12), emoji: String(c.emoji || "📦").slice(0, 4), name: String(c.name || "").slice(0, 24), ...(!P && c.hidden ? { hidden: true } : {}) }))
-        .filter((c) => c.name && !(P && hidden.has(c.id)));
+        .filter((c) => c.name && !(M && hidden.has(c.id)));
       if (!cats.length) return json({ error: "empty" }, 400);
-      // the partner's list has no hidden categories: they stay as they were
-      await s.put("categories", P ? [...cats, ...allCats.filter((c) => c.hidden)] : cats);
+      // the partner's list (and the full phone's everyday one) has no hidden categories: they stay as they were
+      await s.put("categories", M ? [...cats.map((c) => (P ? c : { ...c, hidden: undefined })).map(({ hidden: h, ...c }) => c), ...allCats.filter((c) => c.hidden)] : cats);
       return json({ ok: true });
     }
     if (url.pathname === "/plan") {
@@ -238,7 +241,7 @@ export class House extends DurableObject {
       // keep: which categories go on to the next month (a one-off one — a birthday, a repair — stays in its month)
       const keep = {};
       for (const [k, v] of Object.entries(body.keep || {})) if (v === false) keep[String(k).slice(0, 12)] = false;
-      if (P) {
+      if (M) {
         // the hidden sums are not in the partner's form: keep them
         const was = await planOf(s, month);
         for (const k of hidden) { if (was.limits?.[k]) limits[k] = was.limits[k]; if (was.keep?.[k] === false) keep[k] = false; else delete keep[k]; }
@@ -328,8 +331,8 @@ export class House extends DurableObject {
         amount: parseAmount(r.amount), cat: String(r.cat || "").slice(0, 12), note: String(r.note || "").slice(0, 80),
         day: Math.min(31, Math.max(1, Math.round(Number(r.day)) || 1)),
         from: /^\d{4}-\d{2}$/.test(r.from || "") ? r.from : cur,
-      })).filter((r) => r.amount && r.cat && !(P && hidden.has(r.cat)));
-      if (P) list.push(...((await s.get("recurring")) || []).filter((r) => hidden.has(r.cat)));
+      })).filter((r) => r.amount && r.cat && !(M && hidden.has(r.cat)));
+      if (M) list.push(...((await s.get("recurring")) || []).filter((r) => hidden.has(r.cat)));
       await s.put("recurring", list);
       return json({ ok: true, recurring: list });
     }
