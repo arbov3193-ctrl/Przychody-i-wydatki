@@ -17,7 +17,7 @@
 //   POST /api/h/<id>/debts           (X-Key) {debts: [{id?, name, amount, dir: "we"|"them", note?}]}   to give back / to get back
 //   POST /api/h/<id>/receipt         (X-Key) {img, thumb (base64 jpeg), tx?, month?}  → {id}   a photo of a receipt
 //   GET  /api/h/<id>/receipt/<rId>   (X-Key) [?thumb=1]  → image/jpeg
-//   POST /api/h/<id>/receipt/<rId>   (X-Key) {tx, month} — attach to an expense | {delete: true}
+//   POST /api/h/<id>/receipt/<rId>   (X-Key) {tx, month} — attach to an expense | {delete: true} | {wty: "YYYY-MM-DD"|"", wtyName}
 //   POST /api/h/<id>/note            (X-Key) {key: categoryId, text}   a note next to a category («» removes it)
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
@@ -118,6 +118,7 @@ export class House extends DurableObject {
         debts: ((await s.get("debts")) || []).filter(seenD),
         notes: strip((await s.get("notes")) || {}),
         receipts: ((await s.get("receipts")) || []).filter((r) => r.date.slice(0, 7) === month && seen(r)),
+        warranties: ((await s.get("receipts")) || []).filter((r) => r.wty && seen(r)),   // of every month
         month,
       });
     }
@@ -134,7 +135,9 @@ export class House extends DurableObject {
       const n = inbox.length;
       const text = n ? `📥 Разобрать: ${n} ${plural(n, "трата", "траты", "трат")} на ${zl(total(inbox))}` : "";
       const bal = await balanceOf(s, P ? hidden : null);
-      return json({ inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
+      const soon = ((await s.get("receipts")) || []).filter((r) => r.wty && seen(r) && r.wty >= today() && r.wty <= shiftDays(today(), 30));
+      const wtyText = soon.map((r) => `🛡 Гарантия «${r.wtyName || r.note || "чек"}» до ${r.wty.slice(8, 10)}.${r.wty.slice(5, 7)}`).join("\n");
+      return json({ wtyText, inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
     }
     if (url.pathname === "/inbox") {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
@@ -355,6 +358,12 @@ export class House extends DurableObject {
         await rcSet(s, meta.id, { tx: t.id, month: t.date.slice(0, 7), cat: t.cat, amount: t.amount, note: t.note });
         return json({ ok: true });
       }
+      if ("wty" in body) {
+        // a warranty: until when, and for what («пылесос»)
+        const wty = /^\d{4}-\d{2}-\d{2}$/.test(body.wty || "") ? body.wty : "";
+        await rcSet(s, meta.id, { wty, wtyName: String(body.wtyName || "").trim().slice(0, 60) });
+        return json({ ok: true });
+      }
       return json({ error: "what" }, 400);
     }
     if (url.pathname === "/note") {
@@ -560,6 +569,7 @@ function today() {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map((x) => [x.type, x.value]));
   return `${p.year}-${p.month}-${p.day}`;
 }
+function shiftDays(iso, n) { const d = new Date(iso + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 const monthOf = (m) => (/^\d{4}-\d{2}$/.test(m || "") ? m : today().slice(0, 7));
 function prevMonth(m) {
   const [y, mo] = m.split("-").map(Number);

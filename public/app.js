@@ -34,7 +34,7 @@ function publicOf(F) {
   return { ...F, categories: F.categories.filter((c) => !c.hidden), tx: F.tx.filter((t) => !hid.has(t.cat)),
     plan: { ...F.plan, limits: strip(F.plan.limits), keep: strip(F.plan.keep) }, notes: strip(F.notes), recurring: (F.recurring || []).filter((r) => !hid.has(r.cat)),
     rules: Object.fromEntries(Object.entries(F.rules || {}).filter(([, c]) => !hid.has(c))), balance: F.balanceShared || F.balance,
-    receipts: (F.receipts || []).filter((r) => !hid.has(r.cat)) };
+    receipts: (F.receipts || []).filter((r) => !hid.has(r.cat)), warranties: (F.warranties || []).filter((r) => !hid.has(r.cat)) };
 }
 function setState(F) { SF = F; S = !F || F.role === "partner" || secret ? F : publicOf(F); }
 const everyday = () => S && SF && S !== SF;   // lists sent to the server lack the hidden items — the server keeps them
@@ -304,6 +304,8 @@ function renderMonth() {
   }).join("");
   const other = Object.keys(by).filter((k) => !S.categories.some((c) => c.id === k));
   app.innerHTML = monthHeader() + balanceCard() + needCard() + `
+    ${(S.warranties || []).filter((r) => r.wty >= todayIso() && r.wty <= shiftDay(todayIso(), 30)).map((r) => `<div class="card row" onclick="setTab('receipts');openReceipt('${r.id}')"><span style="font-size:24px">🛡</span>
+      <div class="sp"><b>Гарантия «${esc(r.wtyName || r.note || "покупка")}» кончается</b><div class="small muted">${wtyLeft(r.wty)} — чек в «Чеки»</div></div><span>›</span></div>`).join("")}
     ${S.inbox.length ? `<div class="card row" onclick="setTab('inbox')"><span style="font-size:24px">📥</span><div class="sp"><b>${S.inbox.length} ${plural(S.inbox.length, "трата ждёт", "траты ждут", "трат ждут")} категорию</b>
       <div class="small muted">${fmt0(S.inbox.reduce((a, t) => a + t.amount, 0))} — нажмите, чтобы разобрать</div></div><span>›</span></div>` : ""}
     <h2>По категориям</h2><div class="card">${cats || `<div class="empty">Трат пока нет. Нажмите ＋</div>`}
@@ -792,16 +794,74 @@ async function readReceipt(file) {
 }
 async function uploadReceipt(d, date) { return (await api("/receipt", { img: d.img, thumb: d.thumb, date, who: me })).id; }
 
+// ------- the sum, the shop and the date from the photo of a Polish receipt («paragon fiskalny»)
+const SHOPS = [
+  [/biedronka|jeronimo/i, "Biedronka", "food"], [/\blidl\b/i, "Lidl", "food"], [/[żz]abka/i, "Żabka", "food"], [/kaufland/i, "Kaufland", "food"],
+  [/auchan/i, "Auchan", "food"], [/carrefour/i, "Carrefour", "food"], [/\bnetto\b/i, "Netto", "food"], [/\bdino\b/i, "Dino", "food"],
+  [/stokrotka/i, "Stokrotka", "food"], [/lewiatan/i, "Lewiatan", "food"], [/polomarket/i, "POLOmarket", "food"], [/\baldi\b/i, "Aldi", "food"],
+  [/rossmann/i, "Rossmann", ""], [/\bhebe\b/i, "Hebe", ""], [/super-?pharm/i, "Super-Pharm", "health"], [/apteka/i, "Apteka", "health"],
+  [/pepco/i, "Pepco", "clothes"], [/\baction\b/i, "Action", ""], [/sinsay/i, "Sinsay", "clothes"], [/reserved/i, "Reserved", "clothes"],
+  [/\bh\s?&\s?m\b/i, "H&M", "clothes"], [/decathlon/i, "Decathlon", ""], [/\bikea\b/i, "IKEA", "home"], [/leroy/i, "Leroy Merlin", "home"],
+  [/castorama/i, "Castorama", "home"], [/\bobi\b/i, "OBI", "home"], [/media\s?expert/i, "Media Expert", ""], [/euro\s?agd|rtv\s?euro/i, "RTV Euro AGD", ""],
+  [/media\s?markt/i, "MediaMarkt", ""], [/orlen/i, "Orlen", "car"], [/\bbp\b/i, "BP", "car"], [/\bshell\b/i, "Shell", "car"], [/circle\s?k/i, "Circle K", "car"],
+  [/\bmoya\b/i, "Moya", "car"], [/mcdonald/i, "McDonald's", "cafe"], [/\bkfc\b/i, "KFC", "cafe"], [/starbucks/i, "Starbucks", "cafe"],
+];
+function parseReceipt(text) {
+  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const A = String.raw`(\d{1,5}(?:[ \u00a0]\d{3})*[.,]\d{2})`;
+  const pick = (re) => { for (const l of lines) { const m = l.match(re); if (m) return num(m[1]); } return 0; };
+  // «SUMA PLN 20,96» (not «SUMA PTU» — the tax), then «RAZEM», «DO ZAPŁATY», then the card / cash line, else the biggest amount
+  let amount = pick(new RegExp(String.raw`\bSUMA\b(?!\s*PTU)\D{0,12}` + A, "i")) || pick(new RegExp(String.raw`\b(?:RAZEM|DO\s*ZAP[ŁL]ATY|NALE[ŻZ]NO[ŚS][ĆC]|TOTAL)\b\D{0,12}` + A, "i"))
+    || pick(new RegExp(String.raw`\b(?:KARTA|P[ŁL]ATNO[ŚS][ĆC]\s*KART|GOT[ÓO]WKA|BLIK)\D{0,25}` + A, "i"));
+  if (!amount) { const all = (text.match(new RegExp(A, "g")) || []).map(num).filter((n) => n < 100000); amount = all.length ? Math.max(...all) : 0; }
+  const shop = SHOPS.find(([re]) => re.test(text));
+  let merchant = shop ? shop[1] : "";
+  if (!merchant) merchant = (lines.find((l) => /\p{L}{3}/u.test(l) && !/paragon|fiskal|\bnip\b|^ul\.|sp\.?\s*z|s\.a\.|\d{2}-\d{3}/i.test(l)) || "").replace(/[^\p{L}\d .&'-]/gu, "").trim().slice(0, 40);
+  let date = "";
+  const d = text.match(/\b(20\d{2})[-.\/](\d{2})[-.\/](\d{2})\b/) || text.match(/\b(\d{2})[-.\/](\d{2})[-.\/](20\d{2})\b/);
+  if (d) {
+    const iso = d[1].length === 4 ? `${d[1]}-${d[2]}-${d[3]}` : `${d[3]}-${d[2]}-${d[1]}`;
+    if (iso <= todayIso() && iso >= shiftDay(todayIso(), -90) && !isNaN(new Date(iso))) date = iso;
+  }
+  return { amount, merchant, date, cat: shop ? shop[2] : "" };
+}
+async function readReceiptText(img) {
+  let r = null;
+  try {
+    const T = await loadTesseract();
+    const { data } = await T.recognize(img, "pol", { logger: (m) => { const e = $("#rcState"); if (e && m.progress) e.textContent = Math.round(m.progress * 100) + "%"; } });
+    r = parseReceipt(data.text);
+  } catch (e) {}
+  if (!draft || !draft.rcData || draft.rcData.img !== img) return;   // the sheet was closed or another photo picked
+  const got = [];
+  if (r && r.amount) { if (!Number(draft.amount)) draft.amount = String(r.amount); got.push(fmt(r.amount)); }
+  if (r && r.merchant) { if (!draft.note) draft.note = r.merchant; got.push(esc(r.merchant)); }
+  if (r && r.date) { if (draft.date === todayIso()) draft.date = r.date; got.push(r.date.slice(8, 10) + "." + r.date.slice(5, 7)); }
+  if (r && !draft.cat) { const c = S.rules[shopKey(r.merchant)] || r.cat; if (c && S.categories.some((x) => x.id === c)) draft.cat = c; }
+  draft.rcRead = got.length ? `🔎 С чека: ${got.join(" · ")} — проверьте` : "🔎 Сумму на чеке не нашёл — впишите сами";
+  if ($("#sheet").classList.contains("on")) drawAdd();
+}
+window.saveReceiptOnly = async () => {
+  const d = draft.rcData;
+  closeSheet();
+  try { const id = await uploadReceipt(d, draft.date); toast("🧾 Чек сохранён"); await load(); setTab("receipts"); openReceipt(id); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+
 // where the picked photo goes: «add» (the new expense), «tx:<id>» (an expense), «new» (a receipt on its own)
 let rcTarget = "";
-window.pickReceipt = (target) => { rcTarget = target; const f = $("#rcFile"); f.value = ""; f.click(); };
+window.pickReceipt = (target) => {
+  // «Добавить чек» in «Чеки»: a new expense with the photo — its sum, shop and date are read from it; «только чек» keeps it alone
+  if (target === "new") { openAdd(); target = "add"; }
+  rcTarget = target; const f = $("#rcFile"); f.value = ""; f.click();
+};
 window.gotReceipt = async (files) => {
   const file = files && files[0];
   if (!file) return;
   toast("Обрабатываю фото…");
   let d;
   try { d = await readReceipt(file); } catch (e) { return toast("Не получилось прочитать фото"); }
-  if (rcTarget === "add") { draft.rcData = d; drawAdd(); return; }
+  if (rcTarget === "add") { draft.rcData = d; draft.rcRead = "reading"; drawAdd(); readReceiptText(d.img); return; }
   try {
     if (rcTarget.startsWith("tx:")) {
       const t = S.tx.find((x) => x.id === rcTarget.slice(3));
@@ -830,28 +890,52 @@ function fillReceipts() {
 
 function renderReceipts() {
   const list = [...(S.receipts || [])].sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  const w = [...(S.warranties || [])].filter((r) => r.wty >= shiftDay(todayIso(), -30)).sort((a, b) => a.wty.localeCompare(b.wty));
   let html = monthHeader() + `<button class="btn" onclick="pickReceipt('new')">📷 Добавить чек</button>
-    <div class="small muted" style="text-align:center;margin-top:6px">Фото чека можно прикрепить и к трате: «История» → трата → «📎».</div>`;
+    <div class="small muted" style="text-align:center;margin-top:6px">Сумма, магазин и дата прочитаются с фото. Чек можно прикрепить и к трате: «История» → трата → «📎».</div>
+    ${w.length ? `<h2>🛡 На гарантии</h2><div class="card">${w.map((r) => `<div class="item" onclick="openReceipt('${r.id}')"><img class="rcmini big" data-rc="${r.id}" data-thumb="1" alt="">
+      <div class="sp"><div>${esc(r.wtyName || r.note || "Покупка")}</div><div class="small ${r.wty < todayIso() ? "neg" : r.wty <= shiftDay(todayIso(), 30) ? "warn" : "muted"}">${wtyLeft(r.wty)}</div></div>
+      <div class="a">${r.amount ? fmt(r.amount) : ""}</div></div>`).join("")}</div><h2>Чеки за ${MONTHS[Number(month.slice(5)) - 1]}</h2>` : ""}`;
   if (!list.length) return (app.innerHTML = html + `<div class="empty">🧾<br><br>Чеков за этот месяц нет. Сфотографируйте чек — для гарантии, возврата или просто на память.</div>`);
   let day = "";
   html += `<div class="rcgrid">`;
   for (const r of list) {
     const t = r.tx ? S.tx.find((x) => x.id === r.tx) : null;
     html += `<div class="rc" onclick="openReceipt('${r.id}')"><img data-rc="${r.id}" data-thumb="1" alt="">
-      <div class="small"><b>${r.amount ? fmt0(r.amount) : "—"}</b> · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}</div>
-      <div class="small muted rcn">${esc(t ? t.note || catOf(t.cat).name : r.note || (r.tx ? "" : "без траты"))}</div></div>`;
+      <div class="small"><b>${r.amount ? fmt(r.amount) : "—"}</b> · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}</div>
+      <div class="small muted rcn">${r.wty && r.wty >= todayIso() ? "🛡 " : ""}${esc(t ? t.note || catOf(t.cat).name : r.note || (r.tx ? "" : "без траты"))}</div></div>`;
   }
   app.innerHTML = html + `</div>`;
 }
 window.openReceipt = (id) => {
-  const r = (S.receipts || []).find((x) => x.id === id) || { id, date: todayIso() };
+  const r = (S.receipts || []).find((x) => x.id === id) || (S.warranties || []).find((x) => x.id === id) || { id, date: todayIso() };
   const t = r.tx ? S.tx.find((x) => x.id === r.tx) : null;
   openSheet(`<div class="row"><b class="sp">🧾 Чек · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}.${r.date.slice(0, 4)}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
     <div class="rcfull" onclick="this.classList.toggle('zoom')"><img data-rc="${id}" alt="Загрузка…"></div>
     <div class="small muted" style="margin-top:6px">Нажмите на фото, чтобы увеличить.</div>
     ${t ? `<div class="item" onclick="openEdit('${t.id}')"><div class="e">${catOf(t.cat).emoji}</div><div class="sp"><div>${esc(t.note || catOf(t.cat).name)}</div><div class="small muted">${esc(catOf(t.cat).name)}${t.who ? " · " + esc(t.who) : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`
       : `<button class="btn ghost" onclick="linkReceipt('${id}')">🔗 Привязать к трате</button>`}
+    <h2>🛡 Гарантия</h2><div class="card">${r.wty ? `<div class="row"><div class="sp"><b>${esc(r.wtyName || (t && t.note) || "Покупка")}</b>
+        <div class="small ${r.wty < todayIso() ? "neg" : "muted"}">${wtyLeft(r.wty)}</div></div><button class="mini" onclick="setWty('${id}','')">Убрать</button></div>`
+      : `<div class="small muted">На что гарантия и сколько. Чек будет в «Чеки» → «На гарантии», а за месяц до конца появится напоминание.</div>`}
+      <input id="wName" placeholder="Что: пылесос, телефон, обувь…" value="${esc(r.wtyName || (t && t.note) || r.note || "")}">
+      <div class="chips">${[[12, "1 год"], [24, "2 года"], [36, "3 года"], [60, "5 лет"]].map(([m, n]) => `<button onclick="setWty('${id}', addMonths('${r.date}', ${m}))">${n}</button>`).join("")}
+        <input id="wDate" type="date" style="width:auto;margin:0;padding:6px 10px" value="${r.wty || ""}" onchange="setWty('${id}', this.value)"></div></div>
     <button class="btn red" onclick="delReceipt('${id}')">Удалить чек</button>`);
+};
+const addMonths = (iso, m) => { const d = new Date(iso + "T12:00:00"); d.setMonth(d.getMonth() + m); return d.toISOString().slice(0, 10); };
+window.addMonths = addMonths;
+function wtyLeft(w) {
+  const days = Math.round((new Date(w + "T12:00:00") - new Date(todayIso() + "T12:00:00")) / 864e5);
+  const date = `${w.slice(8, 10)}.${w.slice(5, 7)}.${w.slice(0, 4)}`;
+  if (days < 0) return `гарантия кончилась ${date}`;
+  if (days <= 60) return `до ${date} · осталось ${days} ${plural(days, "день", "дня", "дней")}`;
+  const mo = Math.round(days / 30.4);
+  return `до ${date} · осталось ${mo} ${plural(mo, "месяц", "месяца", "месяцев")}`;
+}
+window.setWty = async (id, wty) => {
+  try { await api(`/receipt/${id}`, { wty, wtyName: ($("#wName") || {}).value || "" }); toast(wty ? "🛡 Гарантия до " + wty.slice(8, 10) + "." + wty.slice(5, 7) + "." + wty.slice(0, 4) : "Гарантия убрана"); await load(); openReceipt(id); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
 };
 window.linkReceipt = (id) => {
   const free = S.tx.filter((t) => !t.rc).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
@@ -921,7 +1005,9 @@ function drawAdd() {
       <input type="date" style="width:auto;margin:0;padding:6px 10px" value="${d.date}" onchange="draft.date=this.value"></div>
     ${S.members.length > 1 ? `<div class="chips">${S.members.map((w) => `<button class="${d.who === w ? "sug" : ""}" onclick="draft.who='${esc(w)}';drawAdd()">👤 ${esc(w)}</button>`).join("")}</div>` : ""}
     <button class="btn ghost" onclick="pickReceipt('add')">${d.rcData ? `<img class="rcmini" src="${d.rcData.thumb}"> Чек прикреплён ✓ (заменить)` : "📎 Фото чека"}</button>
-    <button class="btn" onclick="saveAdd()">Сохранить${d.cat ? "" : " в «Разобрать»"}</button>`);
+    ${d.rcRead === "reading" ? `<div class="small muted rcread">🔎 Читаю чек… <span id="rcState"></span></div>` : d.rcRead ? `<div class="small rcread">${d.rcRead}</div>` : ""}
+    <button class="btn" onclick="saveAdd()">Сохранить${d.cat ? "" : " в «Разобрать»"}</button>
+    ${d.rcData ? `<button class="btn ghost" onclick="saveReceiptOnly()">Сохранить только чек, без траты</button>` : ""}`);
 }
 window.key = (k) => {
   let a = draft.amount;

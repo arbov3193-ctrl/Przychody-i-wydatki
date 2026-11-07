@@ -77,3 +77,6 @@ label.keep input{width:18px;height:18px;margin:0;padding:0;flex:none}
 .rcthumb{display:block;width:96px;height:128px;object-fit:cover;border-radius:10px;margin-top:6px;background:var(--chip)}
 .rcmini{width:22px;height:22px;object-fit:cover;border-radius:5px;vertical-align:middle;margin-right:4px}
 #tabs button{font-size:10px;padding:0 1px}#tabs button span{font-size:21px}
+.rcread{margin-top:8px;padding:8px 10px;border-radius:10px;background:var(--chip)}
+.rcmini.big{width:40px;height:52px;border-radius:8px;flex:none}
+.warn{color:var(--yellow)}
