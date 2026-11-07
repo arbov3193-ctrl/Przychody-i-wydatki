@@ -80,3 +80,5 @@ label.keep input{width:18px;height:18px;margin:0;padding:0;flex:none}
 .rcread{margin-top:8px;padding:8px 10px;border-radius:10px;background:var(--chip)}
 .rcmini.big{width:40px;height:52px;border-radius:8px;flex:none}
 .warn{color:var(--yellow)}
+.ph{display:none;margin-top:4px;line-height:1.5}.ph.on{display:block}
+.ph{display:none;margin-top:4px;line-height:1.5}.ph.on{display:block}

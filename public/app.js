@@ -288,6 +288,70 @@ window.saveIncome = async (id) => {
 };
 window.delIncome = async (id) => { if (!confirm("Удалить доход?")) return; try { await api(`/income/${id}?month=${month}`, { delete: true }); closeSheet(); load(); } catch (e) { toast("Нет связи"); } };
 
+// ------------------------------------------------------------------ the payment calendar
+
+function billsOf(m) {
+  const [y, mo] = m.split("-").map(Number), days = new Date(y, mo, 0).getDate(), now = todayIso();
+  return (S.bills || []).filter((b) => b.every === "month" || b.month === mo).map((b) => {
+    const due = `${m}-${String(Math.min(b.day, days)).padStart(2, "0")}`;
+    const period = b.every === "year" ? String(y) : m;
+    return { ...b, due, period, paidNow: (b.paid || {})[period], left: Math.round((new Date(due + "T12:00:00") - new Date(now + "T12:00:00")) / 864e5) };
+  }).sort((a, b) => a.due.localeCompare(b.due));
+}
+function billsCard() {
+  const list = billsOf(month);
+  const open = list.filter((b) => !b.paidNow);
+  const row = (b) => `<div class="cat" onclick="openBill('${b.id}')"><div class="e">${b.paidNow ? "✅" : b.left < 0 ? "🔴" : b.left <= 3 ? "🟡" : "📅"}</div>
+    <div class="sp"><div class="n">${esc(b.name)}</div><div class="small ${b.paidNow ? "muted" : b.left < 0 ? "neg" : b.left <= 3 ? "warn" : "muted"}">${b.paidNow ? `оплачено ${b.paidNow.date.slice(8, 10)}.${b.paidNow.date.slice(5, 7)}` : `до ${b.due.slice(8, 10)}.${b.due.slice(5, 7)}${b.left < 0 ? " — просрочено" : b.left === 0 ? " — сегодня" : b.left <= 7 ? ` — через ${b.left} ${plural(b.left, "день", "дня", "дней")}` : ""}`}</div></div>
+    <div class="r">${fmt0(b.paidNow ? b.paidNow.amount : b.amount)}</div>${b.paidNow ? "" : `<button class="mini" onclick="event.stopPropagation();payBill('${b.id}')">Оплатил</button>`}</div>`;
+  return `<h2>📅 Платежи${open.length ? ` · к оплате ${fmt0(open.reduce((a, b) => a + b.amount, 0))}` : ""}</h2><div class="card">
+    ${list.map(row).join("") || `<div class="small muted">Аренда, свет, интернет, страховка OC — с днём оплаты. Видно, что оплачено, что скоро; за 3 дня — напоминание.</div>`}
+    <button class="btn ghost" onclick="openBill('')">＋ Платёж</button></div>`;
+}
+window.openBill = (id) => {
+  const b = (S.bills || []).find((x) => x.id === id) || { name: "", amount: "", day: new Date().getDate(), every: "month", month: new Date().getMonth() + 1, cat: "bills" };
+  openSheet(`<div class="row"><b class="sp">${id ? "Платёж" : "Новый платёж"}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <label>Что</label><input id="bName" value="${esc(b.name)}" placeholder="Аренда, свет, интернет, OC…">
+    <label>Сумма, zł (примерно, если меняется)</label><input id="bAmount" inputmode="decimal" value="${b.amount ? String(b.amount).replace(".", ",") : ""}">
+    <div class="chips"><button id="bMonth" class="${b.every === "month" ? "sug" : ""}" onclick="this.classList.add('sug');$('#bYear').classList.remove('sug');$('#bMo').style.display='none'">Каждый месяц</button>
+      <button id="bYear" class="${b.every === "year" ? "sug" : ""}" onclick="this.classList.add('sug');$('#bMonth').classList.remove('sug');$('#bMo').style.display=''">Раз в год</button></div>
+    <div class="row" style="gap:8px"><div class="sp"><label>Оплатить до (число)</label><input id="bDay" inputmode="numeric" value="${b.day}"></div>
+      <div class="sp" id="bMo" style="${b.every === "year" ? "" : "display:none"}"><label>Месяц</label><select id="bMonthN">${MONTHS.map((n, i) => `<option value="${i + 1}" ${b.month === i + 1 ? "selected" : ""}>${n}</option>`).join("")}</select></div></div>
+    <label>Категория траты, когда оплатите</label><select id="bCat">${S.categories.map((c) => `<option value="${c.id}" ${b.cat === c.id ? "selected" : ""}>${c.emoji} ${esc(c.name)}</option>`).join("")}</select>
+    <button class="btn" onclick="saveBill('${id}')">Сохранить</button>
+    ${id ? `${billsOf(month).find((x) => x.id === id)?.paidNow ? `<button class="btn ghost" onclick="unpayBill('${id}')">Снять отметку «оплачено» за ${MONTHS[Number(month.slice(5)) - 1]}</button>` : ""}<button class="btn red" onclick="delBill('${id}')">Удалить платёж</button>` : ""}
+    <div class="small muted" style="margin-top:8px">«Оплатил» запишет трату в эту категорию с фактической суммой. Не путать с «Каждый месяц» в «Ещё» — те траты записываются сами.</div>`);
+};
+async function putBills(list) { await api("/bills", { bills: list }); await load(); }
+window.saveBill = async (id) => {
+  const name = $("#bName").value.trim();
+  if (!name) return toast("Напишите, что это");
+  const x = { id: id || undefined, name, amount: $("#bAmount").value, day: $("#bDay").value, every: $("#bYear").classList.contains("sug") ? "year" : "month", month: $("#bMonthN").value, cat: $("#bCat").value };
+  const list = (S.bills || []).filter((b) => b.id !== id).concat([x]);
+  try { await putBills(list); closeSheet(); toast("📅 Сохранено"); } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.delBill = async (id) => { if (!confirm("Удалить платёж из календаря? Записанные траты останутся.")) return; try { await putBills(S.bills.filter((b) => b.id !== id)); closeSheet(); } catch (e) { toast("Нет связи"); } };
+window.payBill = (id) => {
+  const b = billsOf(month).find((x) => x.id === id);
+  openSheet(`<div class="row"><b class="sp">Оплатил: ${esc(b.name)}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <label>Сколько заплатили, zł</label><input id="pAmount" inputmode="decimal" value="${b.amount ? String(b.amount).replace(".", ",") : ""}">
+    <label>Когда</label><input id="pDate" type="date" value="${month === todayIso().slice(0, 7) ? todayIso() : b.due}">
+    <button class="btn" onclick="doPayBill('${id}')">Записать</button>
+    <div class="small muted" style="margin-top:6px">Запишется трата «${esc(b.name)}» в «${esc(catOf(b.cat).name)}».</div>`);
+  setTimeout(() => $("#pAmount").focus(), 50);
+};
+window.doPayBill = async (id) => {
+  const amount = Number(String($("#pAmount").value).replace(/\s/g, "").replace(",", "."));
+  if (!(amount > 0)) return toast("Введите сумму");
+  try { await api(`/bills/${id}`, { pay: { amount, date: $("#pDate").value }, who: me }); closeSheet(); toast("✅ Оплачено"); load(); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.unpayBill = async (id) => {
+  const b = billsOf(month).find((x) => x.id === id);
+  if (!confirm("Снять отметку «оплачено»? Записанную трату удалите в «Истории», если она не нужна.")) return;
+  try { await api(`/bills/${id}`, { undo: b.period }); closeSheet(); load(); } catch (e) { toast("Нет связи"); }
+};
+
 function renderMonth() {
   const { by, spent, planned } = sums();
   const budget = S.plan.income || planned;
@@ -303,8 +367,10 @@ function renderMonth() {
       <div class="small muted" style="margin-top:3px">${lim - sp >= 0 ? "осталось " + fmt0(lim - sp) : "перерасход " + fmt0(sp - lim)}</div>` : ""}</div></div>`;
   }).join("");
   const other = Object.keys(by).filter((k) => !S.categories.some((c) => c.id === k));
-  app.innerHTML = monthHeader() + balanceCard() + needCard() + `
-    ${(S.warranties || []).filter((r) => r.wty >= todayIso() && r.wty <= shiftDay(todayIso(), 30)).map((r) => `<div class="card row" onclick="setTab('receipts');openReceipt('${r.id}')"><span style="font-size:24px">🛡</span>
+  app.innerHTML = monthHeader() + balanceCard() + billsCard() + needCard() + `
+    ${(S.warranties || []).filter((r) => r.ret && r.ret >= todayIso() && r.ret <= shiftDay(todayIso(), 3)).map((r) => `<div class="card row" onclick="setTab('receipts');openReceipt('${r.id}')"><span style="font-size:24px">↩️</span>
+      <div class="sp"><b>Вернуть «${esc(r.wtyName || r.note || "покупку")}»</b><div class="small muted">можно до ${r.ret.slice(8, 10)}.${r.ret.slice(5, 7)} · ${retLeft(r.ret)}</div></div><span>›</span></div>`).join("")}
+    ${(S.warranties || []).filter((r) => r.wty && r.wty >= todayIso() && r.wty <= shiftDay(todayIso(), 30)).map((r) => `<div class="card row" onclick="setTab('receipts');openReceipt('${r.id}')"><span style="font-size:24px">🛡</span>
       <div class="sp"><b>Гарантия «${esc(r.wtyName || r.note || "покупка")}» кончается</b><div class="small muted">${wtyLeft(r.wty)} — чек в «Чеки»</div></div><span>›</span></div>`).join("")}
     ${S.inbox.length ? `<div class="card row" onclick="setTab('inbox')"><span style="font-size:24px">📥</span><div class="sp"><b>${S.inbox.length} ${plural(S.inbox.length, "трата ждёт", "траты ждут", "трат ждут")} категорию</b>
       <div class="small muted">${fmt0(S.inbox.reduce((a, t) => a + t.amount, 0))} — нажмите, чтобы разобрать</div></div><span>›</span></div>` : ""}
@@ -622,6 +688,18 @@ function renderSettings() {
         <div class="small muted">${r.day}-го числа · ${esc(catOf(r.cat).name)}</div></div><div class="a">${fmt(r.amount)}</div></div>`).join("")}
       <button class="btn ghost" onclick="openRec(-1)">＋ Повторяющаяся трата</button>
     </div>
+    <h2>🎙 Трата голосом (Siri)</h2><div class="card small">
+      Скажете «Привет, Siri, трата» → «45 злотых продукты Бедронка» — и трата записана, Siri ответит, что записала и сколько осталось.
+      <ol>
+        <li><b>«Команды»</b> → вкладка «Быстрые команды» → <b>＋</b> → назовите команду <b>«Трата»</b></li>
+        <li>Действие <b>«Запросить ввод»</b>: тип «Текст», вопрос «Сколько и на что?»</li>
+        <li>Действие <b>«Получить содержимое URL»</b>: ссылка ниже, Метод <b>POST</b>, Тело <b>JSON</b>, поля: <b>text</b> → «Запрошенный ввод», <b>who</b> → <b>${esc(me || "ваше имя")}</b></li>
+        <li><b>«Получить значение словаря»</b> → ключ <b>text</b>, затем <b>«Произнести текст»</b> (или «Показать результат»)</li>
+      </ol>
+      Понимает: сумму («45», «45,20», «45 злотых 20 грошей»), категорию по слову («продукты», «такси», «бензин», «кафе», «аптека»…), остальное — заметка. Без категории — в «Разобрать».
+      <div class="code">${esc(hook)}</div>
+      <button class="btn ghost" onclick="copy('${esc(hook)}')">📋 Скопировать ссылку</button>
+    </div>
     <h2>Напоминание «разобрать траты» и виджет</h2><div class="card small">
       Ссылка ниже (открывать методом <b>GET</b>) отвечает, сколько трат ждёт в «Разобрать» и сколько осталось в бюджете.
       <ol>
@@ -792,7 +870,20 @@ async function readReceipt(file) {
   if (img.length > 2400000) img = await shrink(file, 1200, 0.6);   // base64 ≈ 4/3 of the bytes; the server takes up to 1.9 MB
   return { img, thumb: await shrink(file, 240, 0.6) };
 }
-async function uploadReceipt(d, date) { return (await api("/receipt", { img: d.img, thumb: d.thumb, date, who: me })).id; }
+// with what was read from it (text, product lines, shop) when it is known; otherwise it is read after the upload
+async function uploadReceipt(d, date, read) {
+  const id = (await api("/receipt", { img: d.img, thumb: d.thumb, date, who: me, ...(read || {}) })).id;
+  if (!read) readLater(id, d.img);
+  return id;
+}
+async function readLater(id, img) {
+  try {
+    const T = await loadTesseract();
+    const { data } = await T.recognize(img, "pol");
+    const r = parseReceipt(data.text);
+    await api(`/receipt/${id}`, { text: data.text, items: r.items, shop: r.merchant });
+  } catch (e) {}
+}
 
 // ------- the sum, the shop and the date from the photo of a Polish receipt («paragon fiskalny»)
 const SHOPS = [
@@ -823,7 +914,16 @@ function parseReceipt(text) {
     const iso = d[1].length === 4 ? `${d[1]}-${d[2]}-${d[3]}` : `${d[3]}-${d[2]}-${d[1]}`;
     if (iso <= todayIso() && iso >= shiftDay(todayIso(), -90) && !isNaN(new Date(iso))) date = iso;
   }
-  return { amount, merchant, date, cat: shop ? shop[2] : "" };
+  // product lines: «Mleko 3,2%  2 x 3,49  6,98 C» (count × price) or «Chleb wiejski  4,99 C»
+  const items = [];
+  const skip = /suma|ptu|sprzeda|razem|karta|got[óo]wk|reszta|rabat|opust|zap[łl]at|nale[żz]n|paragon|nip\b|kasa|kasjer|blik|total|vat/i;
+  for (const l of lines) {
+    let m = l.match(new RegExp(String.raw`^(.{3,}?)\s+(\d+(?:[.,]\d{1,3})?)\s*[x×*]\s*` + A + String.raw`\s+` + A + String.raw`\s*[A-G]?$`, "i"));
+    if (m && !skip.test(m[1])) { items.push({ n: m[1].trim(), q: num(m[2]), p: num(m[3]) }); continue; }
+    m = l.match(new RegExp(String.raw`^(.{3,}?)\s+` + A + String.raw`\s*[A-G]$`));
+    if (m && !skip.test(m[1]) && /\p{L}{3}/u.test(m[1])) items.push({ n: m[1].trim(), q: 1, p: num(m[2]) });
+  }
+  return { amount, merchant, date, cat: shop ? shop[2] : "", items };
 }
 async function readReceiptText(img) {
   let r = null;
@@ -831,6 +931,7 @@ async function readReceiptText(img) {
     const T = await loadTesseract();
     const { data } = await T.recognize(img, "pol", { logger: (m) => { const e = $("#rcState"); if (e && m.progress) e.textContent = Math.round(m.progress * 100) + "%"; } });
     r = parseReceipt(data.text);
+    draft.rcText = { text: data.text, items: r.items, shop: r.merchant };
   } catch (e) {}
   if (!draft || !draft.rcData || draft.rcData.img !== img) return;   // the sheet was closed or another photo picked
   const got = [];
@@ -844,7 +945,7 @@ async function readReceiptText(img) {
 window.saveReceiptOnly = async () => {
   const d = draft.rcData;
   closeSheet();
-  try { const id = await uploadReceipt(d, draft.date); toast("🧾 Чек сохранён"); await load(); setTab("receipts"); openReceipt(id); }
+  try { const id = await uploadReceipt(d, draft.date, draft.rcText); toast("🧾 Чек сохранён"); await load(); setTab("receipts"); openReceipt(id); }
   catch (e) { toast("Нет связи — попробуйте ещё раз"); }
 };
 
@@ -888,11 +989,52 @@ function fillReceipts() {
   document.querySelectorAll("img[data-rc]:not([src])").forEach((el) => rcUrl(el.dataset.rc, el.dataset.thumb).then((u) => { el.src = u; }).catch(() => { el.alt = "нет связи"; }));
 }
 
+// the search goes through the text read from every receipt photo, of every month
+let rcQuery = "", rcTimer = 0;
+window.rcSearch = (q) => {
+  rcQuery = q; clearTimeout(rcTimer);
+  const box = $("#rcres");
+  if (q.trim().length < 2) { box.innerHTML = ""; return; }
+  rcTimer = setTimeout(async () => {
+    try {
+      const { results } = await api("/search?q=" + encodeURIComponent(q.trim()));
+      if (rcQuery !== q) return;
+      box.innerHTML = results.length ? `<div class="card">${results.map((r) => `<div class="item" onclick="openReceipt('${r.id}')"><img class="rcmini big" data-rc="${r.id}" data-thumb="1" alt="">
+        <div class="sp"><div>${esc(r.note || r.wtyName || "Чек")} · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}.${r.date.slice(0, 4)}</div><div class="small muted">${r.snippet ? "…" + esc(r.snippet) + "…" : ""}</div></div>
+        <div class="a">${r.amount ? fmt(r.amount) : ""}</div></div>`).join("")}</div>` : `<div class="small muted" style="margin-top:8px">Не нашлось. Ищется в тексте, прочитанном с фото чеков.</div>`;
+      fillReceipts();
+    } catch (e) { box.innerHTML = `<div class="small muted">Нужен интернет</div>`; }
+  }, 350);
+};
+window.openPrices = async (q) => {
+  openSheet(`<div class="row"><b class="sp">📈 Цены по чекам</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <input id="pq" type="search" placeholder="🔍 Товар: молоко, масло…" value="${esc(q || "")}" onchange="openPrices(this.value)"><div id="plist" class="small muted" style="margin-top:10px">Загрузка…</div>`);
+  try {
+    const { items } = await api("/prices?q=" + encodeURIComponent(q || ""));
+    const d = (x) => `${x.date.slice(8, 10)}.${x.date.slice(5, 7)}`;
+    $("#plist").outerHTML = items.length ? `<div class="card">${items.map((x) => {
+      const ch = x.prev ? x.last.p - x.prev.p : 0;
+      return `<div class="item" onclick="this.querySelector('.ph').classList.toggle('on')"><div class="sp"><div>${esc(x.name)}</div>
+        <div class="small muted">${esc(x.last.shop)} · ${d(x.last)}${x.n > 1 ? ` · покупок: ${x.n}` : ""}</div>
+        <div class="ph small muted">${x.seen.map((e) => `${d(e)} ${esc(e.shop)} — ${fmt(e.p)}`).join("<br>")}</div></div>
+        <div class="r"><b>${fmt(x.last.p)}</b>${x.prev ? `<div class="small ${ch > 0 ? "neg" : "pos"}">${ch > 0 ? "↑ +" : "↓ −"}${fmt(Math.abs(ch))} (${ch > 0 ? "+" : "−"}${Math.round(Math.abs(ch) / x.prev.p * 100)}%)</div><div class="small muted">было ${fmt(x.prev.p)}</div>` : ""}</div></div>`;
+    }).join("")}</div><div class="small muted" style="margin-top:6px">Цена за штуку. Нажмите на товар — история цен.</div>`
+      : `<div class="empty">Товаров пока нет. Они берутся из чеков, сфотографированных в «Бюджете» (строки вида «Mleko 2 x 3,49 6,98 C»).</div>`;
+  } catch (e) { $("#plist").textContent = "Нужен интернет"; }
+};
+
 function renderReceipts() {
   const list = [...(S.receipts || [])].sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
-  const w = [...(S.warranties || [])].filter((r) => r.wty >= shiftDay(todayIso(), -30)).sort((a, b) => a.wty.localeCompare(b.wty));
+  const w = [...(S.warranties || [])].filter((r) => r.wty && r.wty >= shiftDay(todayIso(), -30)).sort((a, b) => a.wty.localeCompare(b.wty));
+  const rt = [...(S.warranties || [])].filter((r) => r.ret && r.ret >= todayIso()).sort((a, b) => a.ret.localeCompare(b.ret));
   let html = monthHeader() + `<button class="btn" onclick="pickReceipt('new')">📷 Добавить чек</button>
     <div class="small muted" style="text-align:center;margin-top:6px">Сумма, магазин и дата прочитаются с фото. Чек можно прикрепить и к трате: «История» → трата → «📎».</div>
+    <input id="rq" type="search" placeholder="🔍 Поиск по тексту чеков: пылесос, Philips…" value="${esc(rcQuery)}" oninput="rcSearch(this.value)">
+    <div id="rcres"></div>
+    <button class="btn ghost" onclick="openPrices()">📈 Цены по чекам</button>
+    ${rt.length ? `<h2>↩️ Можно вернуть</h2><div class="card">${rt.map((r) => `<div class="item" onclick="openReceipt('${r.id}')"><img class="rcmini big" data-rc="${r.id}" data-thumb="1" alt="">
+      <div class="sp"><div>${esc(r.wtyName || r.note || "Покупка")}</div><div class="small ${r.ret <= shiftDay(todayIso(), 3) ? "warn" : "muted"}">до ${r.ret.slice(8, 10)}.${r.ret.slice(5, 7)} · ${retLeft(r.ret)}</div></div>
+      <div class="a">${r.amount ? fmt(r.amount) : ""}</div></div>`).join("")}</div>` : ""}
     ${w.length ? `<h2>🛡 На гарантии</h2><div class="card">${w.map((r) => `<div class="item" onclick="openReceipt('${r.id}')"><img class="rcmini big" data-rc="${r.id}" data-thumb="1" alt="">
       <div class="sp"><div>${esc(r.wtyName || r.note || "Покупка")}</div><div class="small ${r.wty < todayIso() ? "neg" : r.wty <= shiftDay(todayIso(), 30) ? "warn" : "muted"}">${wtyLeft(r.wty)}</div></div>
       <div class="a">${r.amount ? fmt(r.amount) : ""}</div></div>`).join("")}</div><h2>Чеки за ${MONTHS[Number(month.slice(5)) - 1]}</h2>` : ""}`;
@@ -921,7 +1063,21 @@ window.openReceipt = (id) => {
       <input id="wName" placeholder="Что: пылесос, телефон, обувь…" value="${esc(r.wtyName || (t && t.note) || r.note || "")}">
       <div class="chips">${[[12, "1 год"], [24, "2 года"], [36, "3 года"], [60, "5 лет"]].map(([m, n]) => `<button onclick="setWty('${id}', addMonths('${r.date}', ${m}))">${n}</button>`).join("")}
         <input id="wDate" type="date" style="width:auto;margin:0;padding:6px 10px" value="${r.wty || ""}" onchange="setWty('${id}', this.value)"></div></div>
+    <h2>↩️ Возврат в магазин</h2><div class="card">${r.ret ? `<div class="row"><div class="sp"><b>Вернуть можно до ${r.ret.slice(8, 10)}.${r.ret.slice(5, 7)}.${r.ret.slice(0, 4)}</b>
+        <div class="small ${r.ret < todayIso() ? "neg" : "muted"}">${retLeft(r.ret)}</div></div><button class="mini" onclick="setRet('${id}','')">Убрать</button></div>`
+      : `<div class="small muted">Сколько дней магазин принимает возврат. За 3 дня до конца — напоминание.</div>`}
+      <div class="chips">${[[14, "14 дней"], [30, "30 дней"], [60, "60 дней"], [100, "100 дней"]].map(([d, n]) => `<button onclick="setRet('${id}', shiftDay('${r.date}', ${d}))">${n}</button>`).join("")}
+        <input type="date" style="width:auto;margin:0;padding:6px 10px" value="${r.ret || ""}" onchange="setRet('${id}', this.value)"></div></div>
     <button class="btn red" onclick="delReceipt('${id}')">Удалить чек</button>`);
+};
+window.shiftDay = shiftDay;
+function retLeft(d) {
+  const days = Math.round((new Date(d + "T12:00:00") - new Date(todayIso() + "T12:00:00")) / 864e5);
+  return days < 0 ? "срок возврата прошёл" : days === 0 ? "последний день — сегодня" : `осталось ${days} ${plural(days, "день", "дня", "дней")}`;
+}
+window.setRet = async (id, ret) => {
+  try { await api(`/receipt/${id}`, { ret, wtyName: ($("#wName") || {}).value || "" }); toast(ret ? "↩️ Вернуть можно до " + ret.slice(8, 10) + "." + ret.slice(5, 7) : "Срок возврата убран"); await load(); openReceipt(id); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
 };
 const addMonths = (iso, m) => { const d = new Date(iso + "T12:00:00"); d.setMonth(d.getMonth() + m); return d.toISOString().slice(0, 10); };
 window.addMonths = addMonths;
@@ -1019,11 +1175,11 @@ window.key = (k) => {
 window.pickCat = (c) => { draft.cat = draft.cat === c ? "" : c; drawAdd(); };
 window.saveAdd = async () => {
   if (!Number(draft.amount)) return toast("Введите сумму");
-  const { rcData, ...rest } = draft;
+  const { rcData, rcText, rcRead, ...rest } = draft;
   const t = { ...rest, amount: Number(draft.amount) };
   closeSheet();
   try {
-    if (rcData) t.rc = await uploadReceipt(rcData, t.date);
+    if (rcData) t.rc = await uploadReceipt(rcData, t.date, draft.rcText);
     await api("/tx", t); toast((draft.cat ? catOf(draft.cat).emoji + " " : "📥 ") + fmt(t.amount) + (rcData ? " · 🧾" : ""));
   }
   catch (e) { delete t.rc; const q = LS.get("queue", []); q.push(t); LS.set("queue", q); toast(rcData ? "Нет интернета — трата сохранится позже, чек нет" : "Нет интернета — сохраню позже"); }

@@ -18,6 +18,11 @@
 //   POST /api/h/<id>/receipt         (X-Key) {img, thumb (base64 jpeg), tx?, month?}  → {id}   a photo of a receipt
 //   GET  /api/h/<id>/receipt/<rId>   (X-Key) [?thumb=1]  → image/jpeg
 //   POST /api/h/<id>/receipt/<rId>   (X-Key) {tx, month} — attach to an expense | {delete: true} | {wty: "YYYY-MM-DD"|"", wtyName}
+//   GET  /api/h/<id>/search?q=…      (X-Key) → receipts whose read text has the words («пылесос», «Philips»)
+//   GET  /api/h/<id>/prices?q=…      (X-Key) → products from the receipts with their prices over time
+//   POST /api/h/<id>/bills           (X-Key) {bills: [{id?, name, amount, day, every: "month"|"year", month?, cat}]}   the payment calendar
+//   POST /api/h/<id>/bills/<bId>     (X-Key) {pay: {amount, date}} → an expense, the bill marked paid | {undo: period}
+//   POST /api/in/<id>/<key>          {text: "45 злотых продукты бедронка", who}   a spoken expense (Siri) → {text} to say back
 //   POST /api/h/<id>/note            (X-Key) {key: categoryId, text}   a note next to a category («» removes it)
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
@@ -118,7 +123,8 @@ export class House extends DurableObject {
         debts: ((await s.get("debts")) || []).filter(seenD),
         notes: strip((await s.get("notes")) || {}),
         receipts: ((await s.get("receipts")) || []).filter((r) => r.date.slice(0, 7) === month && seen(r)),
-        warranties: ((await s.get("receipts")) || []).filter((r) => r.wty && seen(r)),   // of every month
+        warranties: ((await s.get("receipts")) || []).filter((r) => (r.wty || r.ret) && seen(r)),   // of every month
+        bills: (await s.get("bills")) || [],
         month,
       });
     }
@@ -135,9 +141,32 @@ export class House extends DurableObject {
       const n = inbox.length;
       const text = n ? `📥 Разобрать: ${n} ${plural(n, "трата", "траты", "трат")} на ${zl(total(inbox))}` : "";
       const bal = await balanceOf(s, P ? hidden : null);
-      const soon = ((await s.get("receipts")) || []).filter((r) => r.wty && seen(r) && r.wty >= today() && r.wty <= shiftDays(today(), 30));
-      const wtyText = soon.map((r) => `🛡 Гарантия «${r.wtyName || r.note || "чек"}» до ${r.wty.slice(8, 10)}.${r.wty.slice(5, 7)}`).join("\n");
-      return json({ wtyText, inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
+      const rcs = ((await s.get("receipts")) || []).filter(seen);
+      const dm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+      const wtyText = rcs.filter((r) => r.wty && r.wty >= today() && r.wty <= shiftDays(today(), 30)).map((r) => `🛡 Гарантия «${r.wtyName || r.note || "чек"}» до ${dm(r.wty)}`)
+        .concat(rcs.filter((r) => r.ret && r.ret >= today() && r.ret <= shiftDays(today(), 3)).map((r) => `↩️ Вернуть «${r.wtyName || r.note || "покупку"}» можно до ${dm(r.ret)}`)).join("\n");
+      const billsText = billsDue((await s.get("bills")) || [], today()).filter((b) => b.days <= 3).map((b) => `📅 ${b.name} ${b.amount ? zl(b.amount) + " " : ""}${b.days < 0 ? "— просрочено" : b.days === 0 ? "— сегодня" : `— до ${dm(b.due)}`}`).join("\n");
+      return json({ wtyText, billsText, inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
+    }
+    if (url.pathname === "/inbox" && body.text !== undefined && body.amount === undefined) {
+      // spoken to Siri: «45 злотых продукты бедронка», «такси 32,50», «12 кафе» → the sum, a category by its word, the rest is the note
+      const v = spoken(String(body.text), allCats.filter((c) => !(P && c.hidden)));
+      if (!v.amount) return json({ ok: false, text: "Не расслышал сумму. Скажите, например: «45 злотых продукты Бедронка»." });
+      const rules = (await s.get("rules")) || {};
+      const cat = v.cat || (v.note && rules[shopKey(v.note)] && !(P && hidden.has(rules[shopKey(v.note)])) ? rules[shopKey(v.note)] : "");
+      const t = { id: rand(8), amount: v.amount, cat, note: v.note.slice(0, 80), who: await who(body.who), date: today(), time: Date.now(), from: "voice" };
+      if (!cat) {
+        const inbox = (await s.get("inbox")) || [];
+        inbox.unshift({ id: t.id, amount: t.amount, merchant: t.note, who: t.who, date: t.date, time: t.time, ...(P ? {} : { priv: true }) });
+        await s.put("inbox", inbox.slice(0, 300));
+        return json({ ok: true, text: `Записал ${zl(t.amount)}${t.note ? " · " + t.note : ""} в «Разобрать» — категорию не узнал.` });
+      }
+      const k = `tx:${t.date.slice(0, 7)}`;
+      const list = (await s.get(k)) || [];
+      list.unshift(t);
+      await s.put(k, list);
+      const news = await catNews(s, allCats, cat, t.date.slice(0, 7), t.amount);
+      return json({ ok: true, text: "Записал: " + news.text + (t.note ? " · " + t.note : "") });
     }
     if (url.pathname === "/inbox") {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
@@ -329,6 +358,7 @@ export class House extends DurableObject {
       const list = (await s.get("receipts")) || [];
       list.unshift({ id, date: /^\d{4}-\d{2}-\d{2}$/.test(body.date || "") ? body.date : today(), time: Date.now(), who: await who(body.who), tx: "", cat: "", amount: 0, note: String(body.note || "").slice(0, 80), size: img.byteLength });
       await s.put("receipts", list.slice(0, 2000));
+      if (body.text) await s.put(`txt:${id}`, readText(body));
       return json({ ok: true, id });
     }
     const rcM = url.pathname.match(/^\/receipt\/([a-z0-9]{8})$/);
@@ -358,13 +388,92 @@ export class House extends DurableObject {
         await rcSet(s, meta.id, { tx: t.id, month: t.date.slice(0, 7), cat: t.cat, amount: t.amount, note: t.note });
         return json({ ok: true });
       }
-      if ("wty" in body) {
-        // a warranty: until when, and for what («пылесос»)
-        const wty = /^\d{4}-\d{2}-\d{2}$/.test(body.wty || "") ? body.wty : "";
-        await rcSet(s, meta.id, { wty, wtyName: String(body.wtyName || "").trim().slice(0, 60) });
+      if ("wty" in body || "ret" in body) {
+        // a warranty / the last day the thing can be taken back to the shop, and what it is («пылесос»)
+        const d = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || "") ? v : "");
+        const patch = { wtyName: String(body.wtyName || "").trim().slice(0, 60) };
+        if ("wty" in body) patch.wty = d(body.wty);
+        if ("ret" in body) patch.ret = d(body.ret);
+        await rcSet(s, meta.id, patch);
         return json({ ok: true });
       }
+      if (body.text) { await s.put(`txt:${meta.id}`, readText(body)); return json({ ok: true }); }
       return json({ error: "what" }, 400);
+    }
+    if (url.pathname === "/search") {
+      const q = fold(url.searchParams.get("q") || "").trim();
+      if (q.length < 2) return json({ results: [] });
+      const metas = new Map(((await s.get("receipts")) || []).filter(seen).map((r) => [r.id, r]));
+      const results = [];
+      for (const [k, v] of await s.list({ prefix: "txt:" })) {
+        const r = metas.get(k.slice(4));
+        if (!r) continue;
+        const f = fold(v.text || "");
+        const i = f.indexOf(q);
+        if (i < 0 && !fold((r.note || "") + " " + (r.wtyName || "")).includes(q)) continue;
+        const raw = (v.text || "").replace(/\s+/g, " ");
+        results.push({ ...r, snippet: i < 0 ? "" : raw.slice(Math.max(0, i - 30), i + q.length + 40) });
+      }
+      results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+      return json({ results: results.slice(0, 50) });
+    }
+    if (url.pathname === "/prices") {
+      // every product line read from the receipts: name → its prices by date and shop
+      const metas = new Map(((await s.get("receipts")) || []).filter(seen).map((r) => [r.id, r]));
+      const q = fold(url.searchParams.get("q") || "").trim();
+      const by = new Map();
+      for (const [k, v] of await s.list({ prefix: "txt:" })) {
+        const r = metas.get(k.slice(4));
+        if (!r) continue;
+        for (const it of v.items || []) {
+          const key = fold(it.n).replace(/[^a-z0-9% ]/g, "").replace(/\s+/g, " ").trim();
+          if (key.length < 3 || (q && !key.includes(q))) continue;
+          if (!by.has(key)) by.set(key, { name: it.n, seen: [] });
+          by.get(key).seen.push({ p: it.p, date: r.date, shop: v.shop || r.note || "", rc: r.id });
+        }
+      }
+      const items = [...by.values()].map((x) => {
+        x.seen.sort((a, b) => a.date.localeCompare(b.date));
+        const last = x.seen[x.seen.length - 1], prev = [...x.seen].reverse().find((e) => e.p !== last.p && e.date <= last.date);
+        return { name: x.name, last, prev: prev || null, n: x.seen.length, seen: x.seen.slice(-12) };
+      }).sort((a, b) => (!!b.prev - !!a.prev) || b.last.date.localeCompare(a.last.date));
+      return json({ items: items.slice(0, 80) });
+    }
+    if (url.pathname === "/bills") {
+      const was = (await s.get("bills")) || [];
+      const bills = (Array.isArray(body.bills) ? body.bills : []).slice(0, 60).map((b) => {
+        const id = /^[a-z0-9]{8}$/.test(b.id || "") ? b.id : rand(8);
+        return { id, name: String(b.name || "").trim().slice(0, 40), amount: parseAmount(b.amount) || 0, day: Math.min(31, Math.max(1, Math.round(Number(b.day)) || 1)),
+          every: b.every === "year" ? "year" : "month", month: Math.min(12, Math.max(1, Math.round(Number(b.month)) || 1)), cat: String(b.cat || "").slice(0, 12),
+          paid: (was.find((x) => x.id === id) || {}).paid || {} };
+      }).filter((b) => b.name);
+      await s.put("bills", bills);
+      return json({ ok: true, bills });
+    }
+    const billM = url.pathname.match(/^\/bills\/([a-z0-9]{8})$/);
+    if (billM) {
+      const bills = (await s.get("bills")) || [];
+      const b = bills.find((x) => x.id === billM[1]);
+      if (!b) return json({ error: "no bill" }, 404);
+      if (body.undo) { delete b.paid[String(body.undo)]; await s.put("bills", bills); return json({ ok: true, bills }); }
+      const amount = parseAmount(body.pay && body.pay.amount);
+      if (!amount) return json({ error: "amount" }, 400);
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(body.pay.date || "") ? body.pay.date : today();
+      const period = billPeriod(b, date);
+      let txId = "";
+      if (b.cat && !(P && hidden.has(b.cat))) {
+        const t = { id: rand(8), amount, cat: b.cat, note: b.name, who: await who(body.who), date, time: Date.now(), from: "bill" };
+        const k = `tx:${date.slice(0, 7)}`;
+        const list = (await s.get(k)) || [];
+        list.unshift(t);
+        await s.put(k, list);
+        txId = t.id;
+      }
+      b.paid[period] = { date, amount, tx: txId };
+      const keys = Object.keys(b.paid).sort();
+      for (const k of keys.slice(0, Math.max(0, keys.length - 24))) delete b.paid[k];
+      await s.put("bills", bills);
+      return json({ ok: true, bills });
     }
     if (url.pathname === "/note") {
       // a note next to a category in «Бюджет» («купить зимнюю резину», «Ивану до 15-го»)
@@ -435,6 +544,51 @@ async function fullName(s, v) {
   return w;
 }
 
+// Text without Polish / Russian marks and case, for searching («Łódź» = «lodz»)
+const fold = (v) => String(v || "").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").replace(/ł/g, "l");
+// what was read from a receipt photo: the text (for the search), the product lines (for prices) and the shop
+const readText = (b) => ({ text: String(b.text || "").slice(0, 8000), shop: String(b.shop || "").slice(0, 40),
+  items: (Array.isArray(b.items) ? b.items : []).slice(0, 120).map((i) => ({ n: String(i.n || "").slice(0, 60), q: Number(i.q) || 1, p: parseAmount(i.p) })).filter((i) => i.n && i.p) });
+
+// A spoken expense: the first number is the sum («45», «45,20», «45 злотых 20»), a word of a category (or a common one: такси,
+// бензин, аптека, кафе) picks it, the other words (shops) are the note
+const VOICE_WORDS = [[/продукт|еда|магазин|хлеб|молок|овощ|фрукт|мяс|biedronk|бедронк|lidl|лидл|żabk|жабк/i, "food"], [/такси|автобус|трамва|бил[её]т|uber|убер|bolt|болт/i, "transport"],
+  [/бензин|топлив|заправ|орлен|orlen|машин|авто/i, "car"], [/кафе|ресторан|кофе|обед|ужин|пицц|доставк|макдон|kfc/i, "cafe"], [/аптек|лекарств|врач|здоров/i, "health"],
+  [/одежд|обув|куртк|pepco|пепко|sinsay|синсей/i, "clothes"], [/дет|игрушк|садик|школ/i, "kids"], [/подар/i, "gifts"], [/кино|развлеч|игр/i, "fun"],
+  [/свет|газ|интернет|телефон|связь|счет|счёт/i, "bills"], [/аренд|квартир|жиль/i, "home"]];
+function spoken(text, cats) {
+  let t = " " + text.replace(/\s+/g, " ") + " ";
+  // «\w» does not take Cyrillic letters: the word endings are spelled out
+  const m = t.match(/(\d+(?:[.,]\d{1,2})?)(?:\s*(?:зл[а-яё]*|zł[a-z]*|zl[a-z]*|pln))?(?:\s+(\d{1,2})\s*(?:гр[а-яё]*|gr[a-z]*))?/i);
+  if (!m) return { amount: 0 };
+  let amount = parseAmount(m[1]);
+  if (m[2]) amount = Math.round((Math.floor(amount) + Number(m[2]) / 100) * 100) / 100;
+  t = t.replace(m[0], " ");
+  const words = t.split(" ").filter((w) => w && !/^(зл[а-яё]*|zł[a-z]*|pln|гр[а-яё]*|на|в|за|и|трата|потратил[а-яё]*|заплатил[а-яё]*|купил[а-яё]*)$/i.test(w));
+  let cat = "";
+  for (let i = 0; i < words.length && !cat; i++) {
+    const w = fold(words[i]);
+    const c = cats.find((c) => { const n = fold(c.name).split(/[ ,]+/)[0]; return n.length >= 3 && (w.startsWith(n.slice(0, 5)) || n.startsWith(w.slice(0, 5)) && w.length >= 4); });
+    const v = !c && VOICE_WORDS.find(([re]) => re.test(words[i]));
+    if (c) { cat = c.id; words.splice(i, 1); } else if (v && cats.some((c) => c.id === v[1])) { cat = v[1]; if (!/biedronk|бедронк|lidl|лидл|żabk|жабк|orlen|орлен|pepco|пепко|sinsay|синсей|uber|убер|bolt|болт|kfc|макдон/i.test(words[i])) words.splice(i, 1); }
+  }
+  const note = words.join(" ").trim();
+  return { amount, cat, note: note ? note[0].toUpperCase() + note.slice(1) : "" };
+}
+
+// The payment calendar: a bill is due on its day each month (or each year in its month); «paid» keeps the periods paid
+const billPeriod = (b, date) => (b.every === "year" ? date.slice(0, 4) : date.slice(0, 7));
+function billsDue(bills, now) {
+  return bills.map((b) => {
+    const y = Number(now.slice(0, 4)), mo = b.every === "year" ? b.month : Number(now.slice(5, 7));
+    const days = new Date(y, mo, 0).getDate();
+    const due = `${y}-${String(mo).padStart(2, "0")}-${String(Math.min(b.day, days)).padStart(2, "0")}`;
+    const period = b.every === "year" ? String(y) : now.slice(0, 7);
+    const left = Math.round((new Date(due + "T12:00:00Z") - new Date(now + "T12:00:00Z")) / 864e5);
+    return { ...b, due, period, days: left, isPaid: !!(b.paid || {})[period] };
+  }).filter((b) => !b.isPaid && (b.every === "month" || (b.days <= 31 && b.days >= -31)));
+}
+
 // Receipts: the photo (`img:<id>`), its small copy (`thm:<id>`) and a line in `receipts` — the date, who, and the expense
 // it belongs to (its category is kept there too, so a receipt of a hidden expense is hidden with it).
 const b64 = (v) => { try { const t = atob(String(v || "").replace(/^data:[^,]*,/, "")); const u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i); return u.length ? u : null; } catch (e) { return null; } };
@@ -446,7 +600,7 @@ async function rcSet(s, id, patch) {
   await s.put("receipts", list);
 }
 async function rcDel(s, id) {
-  await s.delete([`img:${id}`, `thm:${id}`]);
+  await s.delete([`img:${id}`, `thm:${id}`, `txt:${id}`]);
   await s.put("receipts", ((await s.get("receipts")) || []).filter((r) => r.id !== id));
 }
 
