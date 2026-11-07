@@ -20,6 +20,9 @@ jobs:
           node-version: 20
       - name: Deploy
         run: |
+          # every deploy gives the service worker a new version, so the phones pick the update up by themselves
+          sed -i "s/const CACHE = \"[^\"]*\"/const CACHE = \"budget-${GITHUB_SHA::8}\"/" public/sw.js
+          grep -n "const CACHE" public/sw.js
           npx --yes wrangler@3 deploy
           sub=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain // empty')
           echo "Budget app: https://budget.$sub.workers.dev" >> "$GITHUB_STEP_SUMMARY"

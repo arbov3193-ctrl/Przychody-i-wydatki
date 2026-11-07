@@ -1141,7 +1141,7 @@ window.joinBy = async (raw, who) => {
 // ------------------------------------------------------------------ sheets: add, edit, plan
 
 function openSheet(html) { const s = $("#sheet"); s.innerHTML = `<div class="in">${html}</div>`; s.classList.add("on"); fillReceipts(); }
-function closeSheet() { $("#sheet").classList.remove("on"); }
+function closeSheet() { $("#sheet").classList.remove("on"); if (pendingReload) setTimeout(reloadNow, 300); }
 $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
 window.closeSheet = closeSheet;
 
@@ -1266,7 +1266,24 @@ document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("cli
   if (b.dataset.tab === "history") histFilter = null;
   tab = b.dataset.tab; render();
 }));
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// Updates without closing the app: each deploy gives sw.js a new version; when the app comes back on the screen (and every
+// few minutes) it asks for sw.js, the new one takes over and the page reloads — but not while a form is open.
+let pendingReload = false;
+function reloadNow() {
+  if ($("#sheet").classList.contains("on")) { pendingReload = true; return; }
+  try { sessionStorage.setItem("updated", "1"); } catch (e) {}
+  location.reload();
+}
+if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;   // the very first install is not an update
+  navigator.serviceWorker.register("sw.js").then((reg) => {
+    const check = () => reg.update().catch(() => {});
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") check(); });
+    setInterval(check, 5 * 60 * 1000);
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) reloadNow(); });
+}
+try { if (sessionStorage.getItem("updated")) { sessionStorage.removeItem("updated"); setTimeout(() => toast("Обновлено ✓"), 400); } } catch (e) {}
 const joinParam = new URLSearchParams(location.search).get("join");
 if (joinParam && !house) { renderStart(); $("#code").value = joinParam; }
 else if (house) { load().then(flushQueue); setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000); }
