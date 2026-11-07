@@ -585,10 +585,10 @@ function renderSettings() {
       <button class="btn ghost" onclick="exportYear()">📤 Весь ${month.slice(0, 4)} год (CSV)</button>
     </div>
     <h2>Категории</h2><div class="card">
-      ${full && secret ? `<div class="small muted" style="margin-bottom:6px">🙈 — скрыть от жены: на её телефоне не будет ни категории, ни трат по ней, ни суммы; её баланс меньше на отложенное в ней.</div>` : ""}
+      ${full && secret ? `<div class="small muted" style="margin-bottom:6px">🙈 — скрыть: на втором телефоне не будет ни категории, ни трат по ней, ни суммы; баланс там меньше на отложенное в ней.</div>` : ""}
       ${S.categories.map((c, i) => `<div class="cat"><input style="width:56px;text-align:center;margin:0" value="${esc(c.emoji)}" onchange="catEdit(${i},'emoji',this.value)">
         <input style="margin:0" value="${esc(c.name)}" onchange="catEdit(${i},'name',this.value)">
-        ${full && secret ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="catHide(${i})" aria-label="Скрыть от жены">🙈</button>` : ""}
+        ${full && secret ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="catHide(${i})" aria-label="Скрыть">🙈</button>` : ""}
         <button class="btn ghost" style="width:auto;margin:0;padding:10px" onclick="catDel(${i})">✕</button></div>`).join("")}
       <button class="btn ghost" onclick="catAdd()">＋ Категория</button>
     </div>
@@ -601,9 +601,9 @@ function renderSettings() {
 }
 window.catHide = async (i) => {
   const c = S.categories[i];
-  if (!c.hidden && !confirm(`Скрыть «${c.name}» от жены?\n\nНа её телефоне пропадут эта категория, траты по ней, сумма и заметка. Её баланс будет меньше на сумму, отложенную в этой категории.`)) return;
+  if (!c.hidden && !confirm(`Скрыть «${c.name}»?\n\nНа втором телефоне пропадут эта категория, траты по ней, сумма и заметка. Баланс там будет меньше на сумму, отложенную в этой категории.`)) return;
   c.hidden = !c.hidden;
-  try { await api("/categories", { categories: S.categories }); toast(c.hidden ? "🙈 Скрыто от жены" : "Снова видно жене"); load(); }
+  try { await api("/categories", { categories: S.categories }); toast(c.hidden ? "🙈 Скрыто" : "Снова видно"); load(); }
   catch (e) { c.hidden = !c.hidden; toast("Нет связи — попробуйте ещё раз"); }
 };
 window.renewPartner = async () => {
@@ -815,11 +815,11 @@ window.openPlan = (draft) => {
     <div id="pLeft" class="small" style="margin-top:6px"></div>
     <h2>Сколько надо по категориям</h2>
     <div class="small muted">Галочка ↪ — сумма перейдёт на следующий месяц. Снимите для разового: подарок, ремонт, поездка.</div>
-    ${secret && S.role !== "partner" ? `<div class="small muted" style="margin-top:4px">🙈 — скрыть от жены (видно только в этом режиме).</div>` : ""}
+    ${secret && S.role !== "partner" ? `<div class="small muted" style="margin-top:4px">🙈 — скрыть (видно только в этом режиме).</div>` : ""}
     ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}</div>
       <label class="keep"><input type="checkbox" class="keepc" data-id="${c.id}" ${keep[c.id] === false ? "" : "checked"}> ↪ на след. месяц</label>
       ${by[c.id] ? `<div class="small muted">потрачено ${fmt0(by[c.id])}</div>` : ""}</div>
-      ${secret && S.role !== "partner" ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="planHide('${c.id}')" aria-label="Скрыть от жены">🙈</button>` : ""}
+      ${secret && S.role !== "partner" ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="planHide('${c.id}')" aria-label="Скрыть">🙈</button>` : ""}
       <input class="lim" data-id="${c.id}" inputmode="decimal" style="width:100px;margin:0;text-align:right" placeholder="0" value="${lim[c.id] || ""}" oninput="planLeft()"></div>`).join("")}
     <button class="btn ghost" onclick="planCatAdd()">＋ Категория</button>
     <button class="btn" onclick="savePlan()">Сохранить</button>`);
@@ -835,7 +835,7 @@ function planDraft() {
 window.planHide = async (id) => {
   const draft = planDraft(), c = S.categories.find((x) => x.id === id);
   c.hidden = !c.hidden;
-  try { await api("/categories", { categories: S.categories }); openPlan(draft); toast(c.hidden ? "🙈 Скрыто от жены" : "Снова видно жене"); }
+  try { await api("/categories", { categories: S.categories }); openPlan(draft); toast(c.hidden ? "🙈 Скрыто" : "Снова видно"); }
   catch (e) { c.hidden = !c.hidden; toast("Нет связи — попробуйте ещё раз"); }
 };
 window.planCatAdd = async () => {
