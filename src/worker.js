@@ -82,6 +82,9 @@ export class House extends DurableObject {
     const seenIn = (t) => !P || !t.priv;                     // an unsorted payment the partner may see
     // the full phone in its everyday look sends lists without the hidden items: they are kept, as for the partner
     const M = P || body.keepHidden === true;
+    // «нам должны» written from the full phone is kept from the partner (and so is the income when it comes back)
+    const seenD = (d) => !P || !(d.dir === "them" && !d.pub);
+    const seenI = (t) => !P || !t.priv;
     const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !P || !hidden.has(k)));
 
     if (url.pathname === "/state") {
@@ -109,10 +112,10 @@ export class House extends DurableObject {
         rules: Object.fromEntries(Object.entries((await s.get("rules")) || {}).filter(([, c]) => !P || !hidden.has(c))),
         recurring: ((await s.get("recurring")) || []).filter(seen),
         settings: { autoSort: true, ...((await s.get("settings")) || {}) },
-        inc: (await s.get(`inc:${month}`)) || [],
+        inc: ((await s.get(`inc:${month}`)) || []).filter(seenI),
         balance: await balanceOf(s, P ? hidden : null),
         balanceShared: P ? undefined : await balanceOf(s, hidden),   // what the wife sees — the full phone's everyday look
-        debts: (await s.get("debts")) || [],
+        debts: ((await s.get("debts")) || []).filter(seenD),
         notes: strip((await s.get("notes")) || {}),
         receipts: ((await s.get("receipts")) || []).filter((r) => r.date.slice(0, 7) === month && seen(r)),
         month,
@@ -266,7 +269,7 @@ export class House extends DurableObject {
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
       const inc = { id: rand(8), amount, cat: String(body.cat || "other").slice(0, 12), note: String(body.note || "").slice(0, 80), who: await who(body.who),
-        date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now() };
+        date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), ...(!P && body.priv === true ? { priv: true } : {}) };
       const k = `inc:${inc.date.slice(0, 7)}`;
       const list = (await s.get(k)) || [];
       list.unshift(inc);
@@ -278,7 +281,7 @@ export class House extends DurableObject {
       const month = monthOf(url.searchParams.get("month"));
       const k = `inc:${month}`;
       let list = (await s.get(k)) || [];
-      const t = list.find((x) => x.id === incEdit[1]);
+      const t = list.find((x) => x.id === incEdit[1] && seenI(x));
       if (!t) return json({ error: "no income" }, 404);
       list = list.filter((x) => x.id !== t.id);
       if (!body.delete) {
@@ -300,12 +303,18 @@ export class House extends DurableObject {
       return json({ ok: true, balance: await balanceOf(s) });
     }
     if (url.pathname === "/debts") {
-      const list = (Array.isArray(body.debts) ? body.debts : []).slice(0, 50).map((d) => ({
-        id: /^[a-z0-9]{8}$/.test(d.id || "") ? d.id : rand(8), name: String(d.name || "").trim().slice(0, 40),
-        amount: parseAmount(d.amount), dir: d.dir === "them" ? "them" : "we", note: String(d.note || "").slice(0, 300),
-      })).filter((d) => d.name && d.amount);
+      const was = (await s.get("debts")) || [];
+      let list = (Array.isArray(body.debts) ? body.debts : []).slice(0, 50).map((d) => {
+        const id = /^[a-z0-9]{8}$/.test(d.id || "") ? d.id : rand(8);
+        const old = was.find((x) => x.id === id);
+        // «нам должны» is open to both only when the partner wrote it
+        const pub = old ? !!old.pub : P;
+        return { id, name: String(d.name || "").trim().slice(0, 40), amount: parseAmount(d.amount), dir: d.dir === "them" ? "them" : "we", note: String(d.note || "").slice(0, 300), ...(pub ? { pub: true } : {}) };
+      }).filter((d) => d.name && d.amount);
+      // the partner's list (and the full phone's everyday one) lacks the hidden ones: they stay
+      if (M) list = [...list.filter((d) => seenD(d) || !P), ...was.filter((d) => d.dir === "them" && !d.pub && !list.some((x) => x.id === d.id))];
       await s.put("debts", list);
-      return json({ ok: true, debts: list, balance: await balanceOf(s) });
+      return json({ ok: true, debts: list.filter(seenD), balance: await balanceOf(s, P ? hidden : null) });
     }
     if (url.pathname === "/receipt" && request.method === "POST") {
       // the phone sends the photo already made small (≈1600 px JPEG) and a little one for the list
@@ -449,12 +458,12 @@ async function balanceOf(s, hidden) {
   const start = (await s.get("balanceStart")) || null;
   const after = (t) => !start || t.date > start.date || (t.date === start.date && (t.time || 0) > start.time);
   let value = start ? start.amount : 0, income = 0, spent = 0;
-  for (const list of (await s.list({ prefix: "inc:" })).values()) for (const t of list) if (after(t)) income += t.amount;
+  for (const list of (await s.list({ prefix: "inc:" })).values()) for (const t of list) if (after(t) && !(hidden && t.priv)) income += t.amount;
   for (const list of (await s.list({ prefix: "tx:" })).values()) for (const t of list) if (after(t)) spent += t.amount;
   for (const t of (await s.get("inbox")) || []) if (after(t)) spent += t.amount;
   const debts = (await s.get("debts")) || [];
   const need = debts.filter((d) => d.dir === "we").reduce((a, d) => a + d.amount, 0);
-  const owed = debts.filter((d) => d.dir === "them").reduce((a, d) => a + d.amount, 0);
+  const owed = debts.filter((d) => d.dir === "them" && (!hidden || d.pub)).reduce((a, d) => a + d.amount, 0);
   const r = (n) => Math.round(n * 100) / 100;
   if (hidden) {
     // the partner's view: the full-key phone's unsorted payments are not shown to her, so they are not taken off yet;

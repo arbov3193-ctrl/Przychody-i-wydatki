@@ -27,6 +27,8 @@ let SF = null;                             // the server state as it came
 let secret = false;
 function publicOf(F) {
   const hid = new Set(F.categories.filter((c) => c.hidden).map((c) => c.id));
+  // «нам должны» from this phone and the incomes when they come back are the wife's view too: not shown
+  F = { ...F, debts: (F.debts || []).filter((d) => !(d.dir === "them" && !d.pub)), inc: (F.inc || []).filter((t) => !t.priv) };
   if (!hid.size) return { ...F, balance: F.balanceShared || F.balance };
   const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !hid.has(k)));
   return { ...F, categories: F.categories.filter((c) => !c.hidden), tx: F.tx.filter((t) => !hid.has(t.cat)),
@@ -164,7 +166,7 @@ function needCard() {
     <div class="r">${!x.lim ? `<span class="muted small">—</span>` : x.sp > x.lim
       ? `<span class="neg">−${fmt0(x.sp - x.lim)}</span><div class="small neg" style="font-weight:600;white-space:nowrap">перерасход</div>`
       : `${fmt0(x.rest)}<div class="small muted" style="font-weight:400">из ${fmt0(x.lim)}</div>`}</div>${noteBtn(x.c.id, notes[x.c.id])}</div>`;
-  const debtRow = (d) => { const i = all.indexOf(d); return `<div class="cat"><div class="e">${d.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(d.name)}</div>
+  const debtRow = (d) => { const i = all.indexOf(d); return `<div class="cat"><div class="e">${d.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(d.name)}${secret && d.dir === "them" && !d.pub ? " 🙈" : ""}</div>
     ${d.note ? `<div class="small note-t">${esc(d.note)}</div>` : `<div class="small muted">${d.dir === "we" ? "нужно отдать" : "должны нам"}</div>`}</div>
     <div class="r">${fmt0(d.amount)}</div>${noteBtn("d:" + i, d.note)}<button class="mini" onclick="settleDebt(${i})">${d.dir === "we" ? "Отдали" : "Вернули"}</button></div>`; };
   return `<h2 id="budget">Бюджет — сколько надо</h2><div class="card">
@@ -172,7 +174,7 @@ function needCard() {
     <div class="row" style="gap:8px"><button class="btn ghost sp" onclick="openPlan()">🎯 Суммы</button><button class="btn ghost sp" onclick="openDebt(-1,'we')">＋ Отдать</button></div>
     <div class="small muted" style="margin-top:8px">Справа — сколько ещё надо по категории в этом месяце (лимит минус потраченное). Нажмите на категорию, чтобы поменять сумму, 📝 — заметка.</div></div>
     ${all.some((d) => d.dir === "them") ? `<h2 id="owed">Нам должны</h2><div class="card">${all.filter((d) => d.dir === "them").map(debtRow).join("")}</div>` : ""}
-    <button class="btn ghost" onclick="openDebt(-1,'them')">🤝 ＋ Нам должны</button>`;
+    ${S.role === "partner" || secret ? `<button class="btn ghost" onclick="openDebt(-1,'them')">🤝 ＋ Нам должны</button>` : ""}`;
 }
 window.openNote = (key) => {
   const isDebt = key.startsWith("d:"), d = isDebt ? S.debts[Number(key.slice(2))] : null;
@@ -209,13 +211,13 @@ window.openDebt = (i, dir) => {
   const d = i >= 0 ? S.debts[i] : { name: "", amount: "", dir: dir || "we" };
   openSheet(`<div class="row"><b class="sp">${i >= 0 ? "Изменить" : d.dir === "we" ? "Нужно отдать" : "Нам должны"}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
     <div class="chips"><button id="dWe" class="${d.dir === "we" ? "sug" : ""}" onclick="this.classList.add('sug');$('#dThem').classList.remove('sug')">💸 Нужно отдать</button>
-      <button id="dThem" class="${d.dir === "them" ? "sug" : ""}" onclick="this.classList.add('sug');$('#dWe').classList.remove('sug')">🤝 Нам должны</button></div>
+      <button id="dThem" class="${d.dir === "them" ? "sug" : ""}" ${S.role === "partner" || secret || d.dir === "them" ? "" : `style="display:none"`} onclick="this.classList.add('sug');$('#dWe').classList.remove('sug')">🤝 Нам должны</button></div>
     <label>Что / кому</label><input id="dName" value="${esc(d.name)}" placeholder="Долг Ивану, налог, ремонт машины…">
     <label>Сумма, zł</label><input id="dAmount" inputmode="decimal" value="${d.amount ? String(d.amount).replace(".", ",") : ""}" placeholder="0">
     <button class="btn" onclick="saveDebt(${i})">Сохранить</button>
     ${i >= 0 ? `<button class="btn red" onclick="delDebt(${i})">Удалить без записи</button>` : ""}`);
 };
-async function putDebts(list) { const r = await api("/debts", { debts: list }); S.debts = r.debts; S.balance = r.balance; render(); }
+async function putDebts(list) { await api("/debts", { debts: list }); await load(); }
 window.saveDebt = async (i) => {
   const name = $("#dName").value.trim(), amount = Number(String($("#dAmount").value).replace(/\s/g, "").replace(",", "."));
   if (!name) return toast("Напишите, что это"); if (!(amount > 0)) return toast("Введите сумму");
@@ -230,7 +232,7 @@ window.settleDebt = async (i) => {
   if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой «💸 Долги» (лимиты категорий не трогает) и уйдёт из бюджета.` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом и прибавится к балансу.`)) return;
   try {
     if (x.dir === "we") await api("/tx", { amount: x.amount, cat: "debt", from: "debt", note: "Долг: " + x.name, who: me, date: todayIso() });
-    else await api("/income", { amount: x.amount, cat: "debt", note: x.name, who: me, date: todayIso() });
+    else await api("/income", { amount: x.amount, cat: "debt", note: x.name, who: me, date: todayIso(), priv: !x.pub });
     await putDebts(S.debts.filter((_, j) => j !== i));
     toast(x.dir === "we" ? "💸 Записано" : "🤝 Записано"); load();
   } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
