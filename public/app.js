@@ -118,7 +118,7 @@ function balanceCard() {
   const mName = MONTHS[Number(month.slice(5)) - 1];
   return `<div class="card">
     <div class="bal">
-      <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div>${b.owed ? `<div class="owed" onclick="event.stopPropagation();document.getElementById('owed').scrollIntoView({behavior:'smooth'})">(+${fmt0(b.owed)} должны вернуть)</div>` : ""}</div>
+      <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div>${b.owed ? `<div class="owed" onclick="event.stopPropagation();document.getElementById('owed').scrollIntoView({behavior:'smooth'})">(${fmt0(b.owed)} должны вернуть)</div>` : ""}</div>
       <div onclick="document.getElementById('budget').scrollIntoView({behavior:'smooth'})" style="text-align:right"><div class="small muted">Бюджет · надо</div><div class="big">${fmt0(bud.total)}</div></div>
     </div>
     <div class="needline ${need > 0 ? "short" : "ok"}">${need > 0 ? `Необходимо: <b>${fmt0(need)}</b>` : `Хватает · останется <b>${fmt0(-need)}</b>`}</div>
