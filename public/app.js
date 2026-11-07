@@ -62,6 +62,8 @@ window.addEventListener("online", flushQueue);
 async function load() {
   try {
     setState(await api("/state?month=" + month));
+    // a name cut at 20 letters by the old server: take the full one once it is known
+    if (me.length === 20) { const f = S.members.find((m) => m.length > 20 && m.startsWith(me)); if (f) { me = f; LS.set("me", f); } }
     LS.set("cache:" + month, SF);
   } catch (e) {
     setState(LS.get("cache:" + month, null));
@@ -535,8 +537,9 @@ function renderSettings() {
   app.innerHTML = `<h1>Ещё</h1>
     <h2>Семья</h2><div class="card">
       <div class="row"><b class="sp">${esc(S.name || "Семья")}</b></div>
-      <label>Этот телефон — кто?</label>
-      <div class="chips">${S.members.map((w) => `<button class="${w === me ? "sug" : ""}" onclick="setMe('${esc(w)}')">👤 ${esc(w)}</button>`).join("")}<button onclick="addMember()">＋ добавить</button></div>
+      <label>Этот телефон</label>
+      ${me ? `<div class="whoami">👤 ${esc(me)}</div>`
+        : `<div class="small muted">Выберите один раз, чей это телефон:</div><div class="chips">${S.members.map((w) => `<button onclick="setMe('${esc(w)}')">👤 ${esc(w)}</button>`).join("")}<button onclick="addMember()">＋ добавить</button></div>`}
       ${full ? `<label>Подключить телефон жены</label>
       <div class="small muted">На её iPhone: Safari → эта ссылка → «Поделиться» → «На экран Домой»; открыть с иконки и вставить ссылку.</div>
       <div class="code">${esc(join)}</div>
@@ -625,7 +628,8 @@ window.rekey = async () => {
 };
 window.share = async (u) => { try { await navigator.share({ title: "Семейный бюджет", url: u }); } catch (e) { copy(u); } };
 window.copy = async (t) => { try { await navigator.clipboard.writeText(t); toast("Скопировано"); } catch (e) { prompt("Скопируйте:", t); } };
-window.setMe = (w) => { me = w; LS.set("me", w); render(); };
+// which person this phone is, set once (on creating or joining); it is not switched from «Ещё»
+window.setMe = (w, force) => { if (me && w !== me && !force) return; me = w; LS.set("me", w); render(); };
 window.addMember = async () => {
   const w = (prompt("Имя (например, Жена):") || "").trim();
   if (!w) return;
@@ -733,7 +737,7 @@ window.create = async () => {
   if (!who) return toast("Введите имя");
   const r = await (await fetch("/api/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Семья", who }) })).json();
   if (!r.id) return toast("Не получилось, попробуйте ещё раз");
-  house = { id: r.id, key: r.key }; LS.set("house", house); setMe(who);
+  house = { id: r.id, key: r.key }; LS.set("house", house); setMe(who, true);
   $("#tabs").style.display = ""; await load(); toast("Бюджет создан");
 };
 window.joinBy = async (raw, who) => {
@@ -742,7 +746,7 @@ window.joinBy = async (raw, who) => {
   house = { id: m[1], key: m[2] }; LS.set("house", house);
   $("#tabs").style.display = "";
   try { await api("/state"); } catch (e) { house = null; LS.set("house", null); renderStart(); return toast("Код не подходит"); }
-  if (who && who.trim()) { await api("/member", { who: who.trim() }); setMe(who.trim()); }
+  if (who && who.trim()) { await api("/member", { who: who.trim() }); setMe(who.trim(), true); }
   history.replaceState(null, "", "/");
   await load(); toast("Подключено");
 };

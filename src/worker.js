@@ -60,7 +60,7 @@ export class House extends DurableObject {
       if (await s.get("key")) return json({ error: "exists" }, 409);
       await s.put("key", body.key);
       await s.put("name", String(body.name || "Семья").slice(0, 40));
-      await s.put("members", body.who ? [String(body.who).slice(0, 20)] : []);
+      await s.put("members", body.who ? [String(body.who).trim().slice(0, 40)] : []);
       await s.put("categories", DEFAULT_CATEGORIES);
       return json({ ok: true });
     }
@@ -72,6 +72,7 @@ export class House extends DurableObject {
     const role = key && given === key ? "full" : pkey && given === pkey ? "partner" : null;
     if (!role) return json({ error: "key" }, 403);
     const P = role === "partner";
+    const who = async (v) => fullName(s, v);
     const allCats = (await s.get("categories")) || DEFAULT_CATEGORIES;
     const hidden = new Set(allCats.filter((c) => c.hidden).map((c) => c.id));
     const seen = (t) => !P || !hidden.has(t.cat);           // an expense the partner may see
@@ -132,7 +133,7 @@ export class House extends DurableObject {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
-      const item = { id: rand(8), amount, merchant: String(body.merchant || "").trim().slice(0, 60), who: String(body.who || "").slice(0, 20), date: today(), time: Date.now(), ...(P ? {} : { priv: true }) };
+      const item = { id: rand(8), amount, merchant: String(body.merchant || "").trim().slice(0, 60), who: await who(body.who), date: today(), time: Date.now(), ...(P ? {} : { priv: true }) };
       // a shop sorted before goes straight into its category (unless switched off in «Ещё»)
       const settings = { autoSort: true, ...((await s.get("settings")) || {}) };
       const cats = allCats;
@@ -154,7 +155,7 @@ export class House extends DurableObject {
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
       if (P && hidden.has(String(body.cat || ""))) return json({ error: "cat" }, 400);
-      const tx = { id: rand(8), amount, cat: String(body.cat || ""), note: String(body.note || "").slice(0, 80), who: String(body.who || "").slice(0, 20),
+      const tx = { id: rand(8), amount, cat: String(body.cat || ""), note: String(body.note || "").slice(0, 80), who: await who(body.who),
         date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), from: body.from ? String(body.from).slice(0, 8) : undefined };
       // an inbox payment sorted into a category: it leaves the inbox; the shop is remembered for the next time
       if (body.remember && body.merchant && tx.cat) {
@@ -253,7 +254,7 @@ export class House extends DurableObject {
     if (url.pathname === "/income" && request.method === "POST") {
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
-      const inc = { id: rand(8), amount, cat: String(body.cat || "other").slice(0, 12), note: String(body.note || "").slice(0, 80), who: String(body.who || "").slice(0, 20),
+      const inc = { id: rand(8), amount, cat: String(body.cat || "other").slice(0, 12), note: String(body.note || "").slice(0, 80), who: await who(body.who),
         date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now() };
       const k = `inc:${inc.date.slice(0, 7)}`;
       const list = (await s.get(k)) || [];
@@ -337,15 +338,31 @@ export class House extends DurableObject {
       return json({ ok: true, recurring: list });
     }
     if (url.pathname === "/member") {
-      const who = String(body.who || "").trim().slice(0, 20);
-      if (!who) return json({ error: "who" }, 400);
+      const w = await who(body.who);
+      if (!w) return json({ error: "who" }, 400);
       const members = (await s.get("members")) || [];
-      if (!members.includes(who)) members.push(who);
+      if (!members.includes(w)) members.push(w);
       await s.put("members", members.slice(0, 10));
       return json({ ok: true, members });
     }
     return json({ error: "not found" }, 404);
   }
+}
+
+// Names used to be cut at 20 letters («Любовь всей моей жиз»). A longer name now keeps 40; when the full name first
+// comes in, the cut one is renamed everywhere — in the members and in every expense, income and unsorted payment.
+async function fullName(s, v) {
+  const w = String(v || "").trim().slice(0, 40);
+  if (w.length <= 20) return w;
+  const short = w.slice(0, 20);
+  const members = (await s.get("members")) || [];
+  if (!members.includes(short) || members.includes(w)) return w;
+  await s.put("members", members.map((m) => (m === short ? w : m)));
+  const fix = async (k, list) => { if (list.some((t) => t.who === short)) await s.put(k, list.map((t) => (t.who === short ? { ...t, who: w } : t))); };
+  for (const [k, list] of await s.list({ prefix: "tx:" })) await fix(k, list);
+  for (const [k, list] of await s.list({ prefix: "inc:" })) await fix(k, list);
+  await fix("inbox", (await s.get("inbox")) || []);
+  return w;
 }
 
 // The month's plan; a month without its own starts from the one before, with only the categories ticked «на след. месяц»
