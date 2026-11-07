@@ -113,7 +113,8 @@ function budgetNeed() {
 }
 function balanceCard() {
   const b = B(), bud = budgetNeed();
-  const need = bud.total - b.value;
+  // what we are owed counts as money that will come: it lowers «Необходимо» (it is not on the account yet, so not in «Баланс»)
+  const need = bud.total - b.value - (b.owed || 0);
   const inc = (S.inc || []).reduce((a, t) => a + t.amount, 0), out = sums().spent;
   const mName = MONTHS[Number(month.slice(5)) - 1];
   return `<div class="card">
@@ -121,7 +122,7 @@ function balanceCard() {
       <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div>${b.owed ? `<div class="owed" onclick="event.stopPropagation();document.getElementById('owed').scrollIntoView({behavior:'smooth'})">(${fmt0(b.owed)} должны вернуть)</div>` : ""}</div>
       <div onclick="document.getElementById('budget').scrollIntoView({behavior:'smooth'})" style="text-align:right"><div class="small muted">Бюджет · надо</div><div class="big">${fmt0(bud.total)}</div></div>
     </div>
-    <div class="needline ${need > 0 ? "short" : "ok"}">${need > 0 ? `Необходимо: <b>${fmt0(need)}</b>` : `Хватает · останется <b>${fmt0(-need)}</b>`}</div>
+    <div class="needline ${need > 0 ? "short" : "ok"}">${need > 0 ? `Необходимо: <b>${fmt0(need)}</b>` : `Хватает · останется <b>${fmt0(-need)}</b>`}${b.owed ? `<div class="small" style="opacity:.8;margin-top:2px">с учётом ${fmt0(b.owed)}, которые должны вернуть</div>` : ""}</div>
     <div class="row small muted" style="margin-top:6px"><span class="sp">${mName[0].toUpperCase() + mName.slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы</span></div>
     ${b.start ? "" : `<div class="small muted" style="margin-top:6px">Нажмите «Баланс», чтобы вписать, сколько сейчас на счёте, — дальше он будет считаться сам.</div>`}
   </div>`;
