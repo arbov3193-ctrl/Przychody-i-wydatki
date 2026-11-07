@@ -815,9 +815,11 @@ window.openPlan = (draft) => {
     <div id="pLeft" class="small" style="margin-top:6px"></div>
     <h2>Сколько надо по категориям</h2>
     <div class="small muted">Галочка ↪ — сумма перейдёт на следующий месяц. Снимите для разового: подарок, ремонт, поездка.</div>
-    ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}${c.hidden ? " 🙈" : ""}</div>
+    ${secret && S.role !== "partner" ? `<div class="small muted" style="margin-top:4px">🙈 — скрыть от жены (видно только в этом режиме).</div>` : ""}
+    ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}</div>
       <label class="keep"><input type="checkbox" class="keepc" data-id="${c.id}" ${keep[c.id] === false ? "" : "checked"}> ↪ на след. месяц</label>
       ${by[c.id] ? `<div class="small muted">потрачено ${fmt0(by[c.id])}</div>` : ""}</div>
+      ${secret && S.role !== "partner" ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="planHide('${c.id}')" aria-label="Скрыть от жены">🙈</button>` : ""}
       <input class="lim" data-id="${c.id}" inputmode="decimal" style="width:100px;margin:0;text-align:right" placeholder="0" value="${lim[c.id] || ""}" oninput="planLeft()"></div>`).join("")}
     <button class="btn ghost" onclick="planCatAdd()">＋ Категория</button>
     <button class="btn" onclick="savePlan()">Сохранить</button>`);
@@ -829,6 +831,13 @@ function planDraft() {
   document.querySelectorAll(".keepc").forEach((e) => { if (!e.checked) keep[e.dataset.id] = false; });
   return { income: $("#pIncome").value, limits, keep };
 }
+// 🙈 right in «Суммы» (only with the secret look on): what was typed stays
+window.planHide = async (id) => {
+  const draft = planDraft(), c = S.categories.find((x) => x.id === id);
+  c.hidden = !c.hidden;
+  try { await api("/categories", { categories: S.categories }); openPlan(draft); toast(c.hidden ? "🙈 Скрыто от жены" : "Снова видно жене"); }
+  catch (e) { c.hidden = !c.hidden; toast("Нет связи — попробуйте ещё раз"); }
+};
 window.planCatAdd = async () => {
   const draft = planDraft();
   const raw = (prompt("Название категории (можно с эмодзи в начале, например «🎂 День рождения»):") || "").trim();
