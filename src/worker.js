@@ -70,6 +70,12 @@ export class House extends DurableObject {
     if (url.pathname === "/state") {
       const month = monthOf(url.searchParams.get("month"));
       await applyRecurring(s, month);
+      // debts given back used to be written into «Прочее» and ate its limit; they have their own «debt» line now
+      const txm = (await s.get(`tx:${month}`)) || [];
+      if (txm.some((t) => t.cat === "other" && !t.from && /^Долг: /.test(t.note || ""))) {
+        for (const t of txm) if (t.cat === "other" && !t.from && /^Долг: /.test(t.note || "")) { t.cat = "debt"; t.from = "debt"; }
+        await s.put(`tx:${month}`, txm);
+      }
       return json({
         name: await s.get("name"),
         members: (await s.get("members")) || [],

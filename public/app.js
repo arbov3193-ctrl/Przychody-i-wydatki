@@ -74,7 +74,9 @@ function sums() {
   const planned = Object.values(S.plan.limits || {}).reduce((a, b) => a + b, 0);
   return { by, spent, planned };
 }
-const catOf = (id) => S.categories.find((c) => c.id === id) || { id, emoji: "📦", name: "Без категории" };
+// «debt» is not one of the family's categories: debts given back have their own line and take nothing from the limits
+const DEBT_CAT = { id: "debt", emoji: "💸", name: "Долги" };
+const catOf = (id) => S.categories.find((c) => c.id === id) || (id === "debt" ? DEBT_CAT : { id, emoji: "📦", name: "Без категории" });
 
 // ------------------------------------------------------------------ screens
 
@@ -193,9 +195,9 @@ window.delDebt = async (i) => { if (!confirm("Удалить? В траты и �
 // given back → an expense (it leaves the account); got back → an income
 window.settleDebt = async (i) => {
   const x = S.debts[i];
-  if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой (Прочее) и уйдёт из «Необходимо».` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом.`)) return;
+  if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой «💸 Долги» (лимиты категорий не трогает) и уйдёт из бюджета.` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом.`)) return;
   try {
-    if (x.dir === "we") await api("/tx", { amount: x.amount, cat: S.categories.some((c) => c.id === "other") ? "other" : S.categories[0].id, note: "Долг: " + x.name, who: me, date: todayIso() });
+    if (x.dir === "we") await api("/tx", { amount: x.amount, cat: "debt", from: "debt", note: "Долг: " + x.name, who: me, date: todayIso() });
     else await api("/income", { amount: x.amount, cat: "debt", note: x.name, who: me, date: todayIso() });
     await putDebts(S.debts.filter((_, j) => j !== i));
     toast(x.dir === "we" ? "💸 Записано" : "🤝 Записано"); load();
@@ -271,7 +273,7 @@ function renderMonth() {
     ${S.inbox.length ? `<div class="card row" onclick="setTab('inbox')"><span style="font-size:24px">📥</span><div class="sp"><b>${S.inbox.length} ${plural(S.inbox.length, "трата ждёт", "траты ждут", "трат ждут")} категорию</b>
       <div class="small muted">${fmt0(S.inbox.reduce((a, t) => a + t.amount, 0))} — нажмите, чтобы разобрать</div></div><span>›</span></div>` : ""}
     <h2>По категориям</h2><div class="card">${cats || `<div class="empty">Трат пока нет. Нажмите ＋</div>`}
-    ${other.map((k) => `<div class="cat"><div class="e">📦</div><div class="sp n">Без категории</div><div class="r">${fmt0(by[k])}</div></div>`).join("")}</div>
+    ${other.map((k) => `<div class="cat" onclick="catHistory('${k}')"><div class="e">${catOf(k).emoji}</div><div class="sp n">${esc(catOf(k).name)}</div><div class="r">${fmt0(by[k])}</div></div>`).join("")}</div>
     ${S.members.length > 1 ? `<h2>Кто тратил</h2><div class="card">${S.members.map((w) => `<div class="cat"><div class="e">👤</div><div class="sp n">${esc(w)}</div><div class="r">${fmt0(S.tx.filter((t) => t.who === w).reduce((a, t) => a + t.amount, 0))}</div></div>`).join("")}</div>` : ""}`;
 }
 const plural = (n, a, b, c) => (n % 10 === 1 && n % 100 !== 11 ? a : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? b : c);
