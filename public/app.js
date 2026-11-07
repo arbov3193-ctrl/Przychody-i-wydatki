@@ -99,28 +99,65 @@ window.go = (n) => { month = shiftMonth(month, n); S = LS.get("cache:" + month, 
 // ------------------------------------------------------------------ balance: what the family has, what has to be given back
 
 const B = () => S.balance || { value: 0, need: 0, owed: 0, free: 0, start: null };
+// «Бюджет» — how much is still needed: what is left of each category's limit this month plus the payments and debts to give;
+// «Необходимо» = Бюджет − Баланс: how much is missing (or, when the balance is bigger, how much is left over)
+function budgetNeed() {
+  const { by } = sums();
+  const lim = S.plan.limits || {};
+  const cats = S.categories.map((c) => ({ c, lim: lim[c.id] || 0, sp: by[c.id] || 0, rest: Math.max(0, (lim[c.id] || 0) - (by[c.id] || 0)) }));
+  const debts = (S.debts || []).filter((d) => d.dir === "we");
+  const total = cats.reduce((a, x) => a + x.rest, 0) + debts.reduce((a, d) => a + d.amount, 0);
+  return { cats, debts, total };
+}
 function balanceCard() {
-  const b = B();
+  const b = B(), bud = budgetNeed();
+  const need = bud.total - b.value;
   const inc = (S.inc || []).reduce((a, t) => a + t.amount, 0), out = sums().spent;
+  const mName = MONTHS[Number(month.slice(5)) - 1];
   return `<div class="card">
     <div class="bal">
-      <div onclick="openBalance()"><div class="small muted">Баланс ✎</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div></div>
-      <div onclick="openDebt(-1,'we')" style="text-align:right"><div class="small muted">Необходимо</div><div class="big need">${fmt0(b.need)}</div></div>
+      <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div></div>
+      <div onclick="document.getElementById('budget').scrollIntoView({behavior:'smooth'})" style="text-align:right"><div class="small muted">Бюджет · надо</div><div class="big">${fmt0(bud.total)}</div></div>
     </div>
-    <div class="row small" style="margin-top:8px"><span class="sp ${b.free < 0 ? "neg" : "muted"}">${b.free >= 0 ? "Свободно" : "Не хватает"}: <b>${fmt0(Math.abs(b.free))}</b>${b.owed ? ` · нам должны ${fmt0(b.owed)}` : ""}</span></div>
-    <div class="row small muted" style="margin-top:4px"><span class="sp">${MONTHS[Number(month.slice(5)) - 1][0].toUpperCase() + MONTHS[Number(month.slice(5)) - 1].slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы</span></div>
+    <div class="needline ${need > 0 ? "short" : "ok"}">${need > 0 ? `Необходимо: <b>${fmt0(need)}</b>` : `Хватает · останется <b>${fmt0(-need)}</b>`}</div>
+    <div class="row small muted" style="margin-top:6px"><span class="sp">${mName[0].toUpperCase() + mName.slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы${b.owed ? ` · нам должны ${fmt0(b.owed)}` : ""}</span></div>
     ${b.start ? "" : `<div class="small muted" style="margin-top:6px">Нажмите «Баланс», чтобы вписать, сколько сейчас на счёте, — дальше он будет считаться сам.</div>`}
   </div>`;
 }
+const noteBtn = (key, has) => `<button class="mini note ${has ? "has" : ""}" onclick="event.stopPropagation();openNote('${key}')" aria-label="Заметка">📝</button>`;
 function needCard() {
-  const d = S.debts || [];
-  const row = (x) => { const i = d.indexOf(x); return `<div class="cat"><div class="e">${x.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(x.name)}</div>
-    <div class="small muted">${x.dir === "we" ? "нужно отдать" : "должны нам"}</div></div><div class="r">${fmt0(x.amount)}</div>
-    <button class="mini" onclick="settleDebt(${i})">${x.dir === "we" ? "Отдали" : "Вернули"}</button></div>`; };
-  return `<h2>Необходимо</h2><div class="card">${d.filter((x) => x.dir === "we").map(row).join("")}${d.filter((x) => x.dir === "them").map(row).join("")}
-    ${d.length ? "" : `<div class="small muted">Долги и обязательные платежи: «отдать долг Ивану 500 zł». Они вычитаются из баланса — видно, сколько свободно.</div>`}
-    <div class="row" style="gap:8px"><button class="btn ghost sp" onclick="openDebt(-1,'we')">＋ Отдать</button><button class="btn ghost sp" onclick="openDebt(-1,'them')">＋ Нам должны</button></div></div>`;
+  const bud = budgetNeed(), notes = S.notes || {}, all = S.debts || [];
+  const catRow = (x) => `<div class="cat" onclick="openPlan()"><div class="e">${x.c.emoji}</div><div class="sp"><div class="n">${esc(x.c.name)}</div>
+    ${notes[x.c.id] ? `<div class="small note-t">${esc(notes[x.c.id])}</div>` : ""}</div>
+    <div class="r">${x.lim ? fmt0(x.rest) : `<span class="muted small">—</span>`}${x.lim ? `<div class="small muted" style="font-weight:400">из ${fmt0(x.lim)}</div>` : ""}</div>${noteBtn(x.c.id, notes[x.c.id])}</div>`;
+  const debtRow = (d) => { const i = all.indexOf(d); return `<div class="cat"><div class="e">${d.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(d.name)}</div>
+    ${d.note ? `<div class="small note-t">${esc(d.note)}</div>` : `<div class="small muted">${d.dir === "we" ? "нужно отдать" : "должны нам"}</div>`}</div>
+    <div class="r">${fmt0(d.amount)}</div>${noteBtn("d:" + i, d.note)}<button class="mini" onclick="settleDebt(${i})">${d.dir === "we" ? "Отдали" : "Вернули"}</button></div>`; };
+  return `<h2 id="budget">Бюджет — сколько надо</h2><div class="card">
+    ${bud.cats.map(catRow).join("")}${bud.debts.map(debtRow).join("")}
+    <div class="row" style="gap:8px"><button class="btn ghost sp" onclick="openPlan()">🎯 Суммы</button><button class="btn ghost sp" onclick="openDebt(-1,'we')">＋ Отдать</button></div>
+    <div class="small muted" style="margin-top:8px">Справа — сколько ещё надо по категории в этом месяце (лимит минус потраченное). Нажмите на категорию, чтобы поменять сумму, 📝 — заметка.</div></div>
+    ${all.some((d) => d.dir === "them") ? `<h2>Нам должны</h2><div class="card">${all.filter((d) => d.dir === "them").map(debtRow).join("")}</div>` : ""}
+    <button class="btn ghost" onclick="openDebt(-1,'them')">🤝 ＋ Нам должны</button>`;
 }
+window.openNote = (key) => {
+  const isDebt = key.startsWith("d:"), d = isDebt ? S.debts[Number(key.slice(2))] : null;
+  const title = isDebt ? d.name : catOf(key).emoji + " " + catOf(key).name;
+  const text = isDebt ? d.note || "" : (S.notes || {})[key] || "";
+  openSheet(`<div class="row"><b class="sp">📝 ${esc(title)}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <textarea id="noteText" rows="4" maxlength="300" placeholder="Например: купить зимнюю резину, отдать до 15-го…">${esc(text)}</textarea>
+    <button class="btn" onclick="saveNote('${key}')">Сохранить</button>
+    ${text ? `<button class="btn red" onclick="$('#noteText').value='';saveNote('${key}')">Удалить заметку</button>` : ""}`);
+  setTimeout(() => $("#noteText").focus(), 50);
+};
+window.saveNote = async (key) => {
+  const text = $("#noteText").value.trim();
+  try {
+    if (key.startsWith("d:")) { const list = S.debts.map((x) => ({ ...x })); list[Number(key.slice(2))].note = text; await putDebts(list); }
+    else { const r = await api("/note", { key, text }); S.notes = r.notes; render(); }
+    closeSheet(); toast(text ? "📝 Сохранено" : "Заметка удалена");
+  } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
 window.openBalance = () => {
   const b = B();
   openSheet(`<div class="row"><b class="sp">Сколько сейчас на счёте</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
@@ -233,7 +270,6 @@ function renderMonth() {
   app.innerHTML = monthHeader() + balanceCard() + needCard() + `
     ${S.inbox.length ? `<div class="card row" onclick="setTab('inbox')"><span style="font-size:24px">📥</span><div class="sp"><b>${S.inbox.length} ${plural(S.inbox.length, "трата ждёт", "траты ждут", "трат ждут")} категорию</b>
       <div class="small muted">${fmt0(S.inbox.reduce((a, t) => a + t.amount, 0))} — нажмите, чтобы разобрать</div></div><span>›</span></div>` : ""}
-    <button class="btn ghost" onclick="openPlan()">🎯 ${budget ? "Изменить" : "Распределить"} бюджет на ${MONTHS[mo - 1]}</button>
     <h2>По категориям</h2><div class="card">${cats || `<div class="empty">Трат пока нет. Нажмите ＋</div>`}
     ${other.map((k) => `<div class="cat"><div class="e">📦</div><div class="sp n">Без категории</div><div class="r">${fmt0(by[k])}</div></div>`).join("")}</div>
     ${S.members.length > 1 ? `<h2>Кто тратил</h2><div class="card">${S.members.map((w) => `<div class="cat"><div class="e">👤</div><div class="sp n">${esc(w)}</div><div class="r">${fmt0(S.tx.filter((t) => t.who === w).reduce((a, t) => a + t.amount, 0))}</div></div>`).join("")}</div>` : ""}`;

@@ -14,7 +14,8 @@
 //   POST /api/h/<id>/income          (X-Key) {amount, cat, note, who, date}   money coming in
 //   POST /api/h/<id>/income/<incId>  (X-Key) {amount?, cat?, note?, date?, delete?}
 //   POST /api/h/<id>/balance         (X-Key) {amount}     «сейчас на счёте» — the balance is counted from here on
-//   POST /api/h/<id>/debts           (X-Key) {debts: [{id?, name, amount, dir: "we"|"them"}]}   to give back / to get back
+//   POST /api/h/<id>/debts           (X-Key) {debts: [{id?, name, amount, dir: "we"|"them", note?}]}   to give back / to get back
+//   POST /api/h/<id>/note            (X-Key) {key: categoryId, text}   a note next to a category («» removes it)
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
 //                                    → {ok, amount, cat?, text, alert}   text: «🛒 Продукты 45,20 zł · осталось 300 zł» for a notification
@@ -84,6 +85,7 @@ export class House extends DurableObject {
         inc: (await s.get(`inc:${month}`)) || [],
         balance: await balanceOf(s),
         debts: (await s.get("debts")) || [],
+        notes: (await s.get("notes")) || {},
         month,
       });
     }
@@ -251,10 +253,20 @@ export class House extends DurableObject {
     if (url.pathname === "/debts") {
       const list = (Array.isArray(body.debts) ? body.debts : []).slice(0, 50).map((d) => ({
         id: /^[a-z0-9]{8}$/.test(d.id || "") ? d.id : rand(8), name: String(d.name || "").trim().slice(0, 40),
-        amount: parseAmount(d.amount), dir: d.dir === "them" ? "them" : "we",
+        amount: parseAmount(d.amount), dir: d.dir === "them" ? "them" : "we", note: String(d.note || "").slice(0, 300),
       })).filter((d) => d.name && d.amount);
       await s.put("debts", list);
       return json({ ok: true, debts: list, balance: await balanceOf(s) });
+    }
+    if (url.pathname === "/note") {
+      // a note next to a category in «Бюджет» («купить зимнюю резину», «Ивану до 15-го»)
+      const k = String(body.key || "").slice(0, 12);
+      if (!k) return json({ error: "key" }, 400);
+      const notes = (await s.get("notes")) || {};
+      const text = String(body.text || "").trim().slice(0, 300);
+      if (text) notes[k] = text; else delete notes[k];
+      await s.put("notes", notes);
+      return json({ ok: true, notes });
     }
     if (url.pathname === "/settings") {
       const settings = { autoSort: true, ...((await s.get("settings")) || {}) };

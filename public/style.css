@@ -52,3 +52,9 @@ ol{padding-left:20px;margin-top:6px}ol li{margin:6px 0}
 .neg{color:var(--red)!important}.pos{color:var(--green)}
 .mini{border:1px solid var(--line);background:var(--chip);color:var(--text);border-radius:10px;padding:6px 9px;font-size:13px;font-weight:600;flex:none}
 #tabs button{min-width:0}
+.needline{margin-top:10px;padding:10px 12px;border-radius:12px;font-size:17px}
+.needline.short{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.needline.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.mini.note{padding:5px 7px;opacity:.45}.mini.note.has{opacity:1;border-color:var(--accent)}
+.note-t{color:var(--text);opacity:.8;font-style:italic;margin-top:2px;white-space:pre-wrap}
+textarea{width:100%;font:inherit;font-size:17px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);margin-top:10px;resize:vertical}
