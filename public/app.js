@@ -86,6 +86,7 @@ function render() {
   if (!S) { app.innerHTML = `<div class="empty">Загрузка…</div>`; return; }
   if (tab === "month") renderMonth();
   else if (tab === "inbox") renderInbox();
+  else if (tab === "income") renderIncome();
   else if (tab === "history") renderHistory();
   else if (tab === "settings") renderSettings();
 }
@@ -95,18 +96,130 @@ function monthHeader() {
 }
 window.go = (n) => { month = shiftMonth(month, n); S = LS.get("cache:" + month, S && { ...S, tx: [] }); render(); load(); };
 
+// ------------------------------------------------------------------ balance: what the family has, what has to be given back
+
+const B = () => S.balance || { value: 0, need: 0, owed: 0, free: 0, start: null };
+function balanceCard() {
+  const b = B();
+  const inc = (S.inc || []).reduce((a, t) => a + t.amount, 0), out = sums().spent;
+  return `<div class="card">
+    <div class="bal">
+      <div onclick="openBalance()"><div class="small muted">Баланс ✎</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div></div>
+      <div onclick="openDebt(-1,'we')" style="text-align:right"><div class="small muted">Необходимо</div><div class="big need">${fmt0(b.need)}</div></div>
+    </div>
+    <div class="row small" style="margin-top:8px"><span class="sp ${b.free < 0 ? "neg" : "muted"}">${b.free >= 0 ? "Свободно" : "Не хватает"}: <b>${fmt0(Math.abs(b.free))}</b>${b.owed ? ` · нам должны ${fmt0(b.owed)}` : ""}</span></div>
+    <div class="row small muted" style="margin-top:4px"><span class="sp">${MONTHS[Number(month.slice(5)) - 1][0].toUpperCase() + MONTHS[Number(month.slice(5)) - 1].slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы</span></div>
+    ${b.start ? "" : `<div class="small muted" style="margin-top:6px">Нажмите «Баланс», чтобы вписать, сколько сейчас на счёте, — дальше он будет считаться сам.</div>`}
+  </div>`;
+}
+function needCard() {
+  const d = S.debts || [];
+  const row = (x) => { const i = d.indexOf(x); return `<div class="cat"><div class="e">${x.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(x.name)}</div>
+    <div class="small muted">${x.dir === "we" ? "нужно отдать" : "должны нам"}</div></div><div class="r">${fmt0(x.amount)}</div>
+    <button class="mini" onclick="settleDebt(${i})">${x.dir === "we" ? "Отдали" : "Вернули"}</button></div>`; };
+  return `<h2>Необходимо</h2><div class="card">${d.filter((x) => x.dir === "we").map(row).join("")}${d.filter((x) => x.dir === "them").map(row).join("")}
+    ${d.length ? "" : `<div class="small muted">Долги и обязательные платежи: «отдать долг Ивану 500 zł». Они вычитаются из баланса — видно, сколько свободно.</div>`}
+    <div class="row" style="gap:8px"><button class="btn ghost sp" onclick="openDebt(-1,'we')">＋ Отдать</button><button class="btn ghost sp" onclick="openDebt(-1,'them')">＋ Нам должны</button></div></div>`;
+}
+window.openBalance = () => {
+  const b = B();
+  openSheet(`<div class="row"><b class="sp">Сколько сейчас на счёте</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <div class="small muted" style="margin-top:6px">Впишите баланс из приложения банка. Дальше он считается сам: доходы прибавляются, траты вычитаются. Если разойдётся с банком — впишите заново.</div>
+    <label>Баланс, zł</label><input id="bAmount" inputmode="decimal" value="${String(b.value).replace(".", ",")}">
+    <button class="btn" onclick="saveBalance()">Сохранить</button>
+    ${b.start ? `<div class="small muted" style="margin-top:8px">Последний раз вписан ${b.start.date.slice(8, 10)}.${b.start.date.slice(5, 7)}: ${fmt(b.start.amount)}</div>` : ""}`);
+};
+window.saveBalance = async () => {
+  const v = String($("#bAmount").value).replace(/\s/g, "").replace(",", ".");
+  if (v === "" || !Number.isFinite(Number(v))) return toast("Введите сумму");
+  try { const r = await api("/balance", { amount: v }); S.balance = r.balance; closeSheet(); render(); toast("Баланс сохранён"); } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.openDebt = (i, dir) => {
+  const d = i >= 0 ? S.debts[i] : { name: "", amount: "", dir: dir || "we" };
+  openSheet(`<div class="row"><b class="sp">${i >= 0 ? "Изменить" : d.dir === "we" ? "Нужно отдать" : "Нам должны"}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <div class="chips"><button id="dWe" class="${d.dir === "we" ? "sug" : ""}" onclick="this.classList.add('sug');$('#dThem').classList.remove('sug')">💸 Нужно отдать</button>
+      <button id="dThem" class="${d.dir === "them" ? "sug" : ""}" onclick="this.classList.add('sug');$('#dWe').classList.remove('sug')">🤝 Нам должны</button></div>
+    <label>Что / кому</label><input id="dName" value="${esc(d.name)}" placeholder="Долг Ивану, налог, ремонт машины…">
+    <label>Сумма, zł</label><input id="dAmount" inputmode="decimal" value="${d.amount ? String(d.amount).replace(".", ",") : ""}" placeholder="0">
+    <button class="btn" onclick="saveDebt(${i})">Сохранить</button>
+    ${i >= 0 ? `<button class="btn red" onclick="delDebt(${i})">Удалить без записи</button>` : ""}`);
+};
+async function putDebts(list) { const r = await api("/debts", { debts: list }); S.debts = r.debts; S.balance = r.balance; render(); }
+window.saveDebt = async (i) => {
+  const name = $("#dName").value.trim(), amount = Number(String($("#dAmount").value).replace(/\s/g, "").replace(",", "."));
+  if (!name) return toast("Напишите, что это"); if (!(amount > 0)) return toast("Введите сумму");
+  const list = [...(S.debts || [])], x = { ...(i >= 0 ? list[i] : {}), name, amount, dir: $("#dThem").classList.contains("sug") ? "them" : "we" };
+  if (i >= 0) list[i] = x; else list.push(x);
+  try { await putDebts(list); closeSheet(); } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.delDebt = async (i) => { if (!confirm("Удалить? В траты и доходы ничего не запишется.")) return; try { await putDebts(S.debts.filter((_, j) => j !== i)); closeSheet(); } catch (e) { toast("Нет связи"); } };
+// given back → an expense (it leaves the account); got back → an income
+window.settleDebt = async (i) => {
+  const x = S.debts[i];
+  if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой (Прочее) и уйдёт из «Необходимо».` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом.`)) return;
+  try {
+    if (x.dir === "we") await api("/tx", { amount: x.amount, cat: S.categories.some((c) => c.id === "other") ? "other" : S.categories[0].id, note: "Долг: " + x.name, who: me, date: todayIso() });
+    else await api("/income", { amount: x.amount, cat: "debt", note: x.name, who: me, date: todayIso() });
+    await putDebts(S.debts.filter((_, j) => j !== i));
+    toast(x.dir === "we" ? "💸 Записано" : "🤝 Записано"); load();
+  } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+
+// ------------------------------------------------------------------ incomes
+
+const INCOME_CATS = [
+  { id: "salary", emoji: "💼", name: "Зарплата" }, { id: "benefit", emoji: "👶", name: "800+ / пособия" }, { id: "side", emoji: "🛠", name: "Подработка" },
+  { id: "gift", emoji: "🎁", name: "Подарок" }, { id: "debt", emoji: "🤝", name: "Вернули долг" }, { id: "refund", emoji: "↩️", name: "Возврат" }, { id: "other", emoji: "💰", name: "Другое" },
+];
+const incCat = (id) => INCOME_CATS.find((c) => c.id === id) || INCOME_CATS[INCOME_CATS.length - 1];
+function renderIncome() {
+  const list = [...(S.inc || [])].sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  const sum = list.reduce((a, t) => a + t.amount, 0);
+  const by = {};
+  for (const t of list) by[t.cat] = (by[t.cat] || 0) + t.amount;
+  let html = monthHeader() + `<div class="card"><div class="small muted">Доходы за ${MONTHS[Number(month.slice(5)) - 1]}</div><div class="big pos">+${fmt0(sum)}</div>
+    ${S.plan.income ? `<div class="small muted">план: ${fmt0(S.plan.income)}</div>` : ""}
+    ${Object.keys(by).length > 1 ? `<div class="small muted" style="margin-top:6px">${Object.entries(by).map(([k, v]) => `${incCat(k).emoji} ${fmt0(v)}`).join(" · ")}</div>` : ""}</div>
+    <button class="btn" onclick="openIncome()">＋ Доход</button>`;
+  if (!list.length) return (app.innerHTML = html + `<div class="empty">💼<br><br>Зарплата, 800+, подработка, возврат долга — всё, что пришло на счёт. Доходы прибавляются к балансу.</div>`);
+  let day = "";
+  html += `<div class="card" style="padding-top:4px">`;
+  for (const t of list) {
+    if (t.date !== day) { day = t.date; html += `<div class="day">${dayName(day)}</div>`; }
+    const c = incCat(t.cat);
+    html += `<div class="item" onclick="openIncome('${t.id}')"><div class="e">${c.emoji}</div><div class="sp"><div>${esc(t.note || c.name)}</div>
+      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}</div></div><div class="a pos">+${fmt(t.amount)}</div></div>`;
+  }
+  app.innerHTML = html + `</div>`;
+}
+window.openIncome = (id) => {
+  const t = id ? S.inc.find((x) => x.id === id) : { amount: "", cat: "salary", note: "", date: todayIso(), who: me };
+  if (!t) return;
+  openSheet(`<div class="row"><b class="sp">${id ? "Доход" : "Новый доход"}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <label>Сумма, zł</label><input id="iAmount" inputmode="decimal" value="${t.amount ? String(t.amount).replace(".", ",") : ""}" placeholder="0">
+    <div class="cats">${INCOME_CATS.map((c) => `<button class="${t.cat === c.id ? "on" : ""}" data-id="${c.id}" onclick="document.querySelectorAll('#sheet .cats button').forEach(b=>b.classList.remove('on'));this.classList.add('on')"><span>${c.emoji}</span>${c.name}</button>`).join("")}</div>
+    <input id="iNote" placeholder="Откуда (необязательно)" value="${esc(t.note)}">
+    <label>Дата</label><input id="iDate" type="date" value="${t.date}">
+    ${S.members.length > 1 ? `<div class="chips">${S.members.map((w) => `<button class="${t.who === w ? "sug" : ""}" data-who="${esc(w)}" onclick="document.querySelectorAll('#sheet .chips button').forEach(b=>b.classList.remove('sug'));this.classList.add('sug')">👤 ${esc(w)}</button>`).join("")}</div>` : ""}
+    <button class="btn" onclick="saveIncome('${id || ""}')">Сохранить</button>
+    ${id ? `<button class="btn red" onclick="delIncome('${id}')">Удалить</button>` : ""}`);
+  if (!id) setTimeout(() => $("#iAmount").focus(), 50);
+};
+window.saveIncome = async (id) => {
+  const amount = Number(String($("#iAmount").value).replace(/\s/g, "").replace(",", "."));
+  if (!(amount > 0)) return toast("Введите сумму");
+  const body = { amount, cat: $("#sheet .cats button.on")?.dataset.id || "other", note: $("#iNote").value.trim(), date: $("#iDate").value || todayIso(),
+    who: $("#sheet .chips button.sug")?.dataset.who || me };
+  try { await api(id ? `/income/${id}?month=${month}` : "/income", body); closeSheet(); toast("💼 +" + fmt(amount)); load(); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+window.delIncome = async (id) => { if (!confirm("Удалить доход?")) return; try { await api(`/income/${id}?month=${month}`, { delete: true }); closeSheet(); load(); } catch (e) { toast("Нет связи"); } };
+
 function renderMonth() {
   const { by, spent, planned } = sums();
   const budget = S.plan.income || planned;
   const left = budget - spent;
-  const isNow = month === todayIso().slice(0, 7);
-  const [y, mo] = month.split("-").map(Number);
-  const days = new Date(y, mo, 0).getDate();
-  const daysLeft = isNow ? days - new Date().getDate() + 1 : 0;
-  const pct = budget ? Math.min(100, (spent / budget) * 100) : 0;
-  const ring = `<svg class="ring" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--chip)" stroke-width="3.4"/>
-    <circle cx="18" cy="18" r="15.9" fill="none" stroke="${left < 0 ? "var(--red)" : pct > 85 ? "var(--yellow)" : "var(--accent)"}" stroke-width="3.4" stroke-linecap="round"
-    stroke-dasharray="${pct} ${100 - pct}" stroke-dashoffset="25"/></svg>`;
+  const [, mo] = month.split("-").map(Number);
   const cats = S.categories.map((c) => {
     const sp = by[c.id] || 0, lim = (S.plan.limits || {})[c.id] || 0;
     if (!sp && !lim) return "";
@@ -117,14 +230,7 @@ function renderMonth() {
       <div class="small muted" style="margin-top:3px">${lim - sp >= 0 ? "осталось " + fmt0(lim - sp) : "перерасход " + fmt0(sp - lim)}</div>` : ""}</div></div>`;
   }).join("");
   const other = Object.keys(by).filter((k) => !S.categories.some((c) => c.id === k));
-  const diff = S.prevTotal ? spent - S.prevTotal : 0;
-  app.innerHTML = monthHeader() + `
-    <div class="card row">${ring}<div class="sp">
-      <div class="small muted">Потрачено</div><div class="big">${fmt0(spent)}</div>
-      ${budget ? `<div class="${left < 0 ? "" : "muted"}" style="${left < 0 ? "color:var(--red);font-weight:700" : ""}">${left >= 0 ? "осталось " + fmt0(left) : "перерасход " + fmt0(-left)} из ${fmt0(budget)}</div>` : `<div class="muted small">бюджет месяца не задан</div>`}
-      ${isNow && budget && left > 0 ? `<div class="small muted" style="margin-top:4px">≈ ${fmt0(left / daysLeft)} в день до конца месяца</div>` : ""}
-      ${S.prevTotal ? `<div class="small muted" style="margin-top:4px">прошлый месяц: ${fmt0(S.prevTotal)} (${diff >= 0 ? "+" : "−"}${fmt0(Math.abs(diff))})</div>` : ""}
-    </div></div>
+  app.innerHTML = monthHeader() + balanceCard() + needCard() + `
     ${S.inbox.length ? `<div class="card row" onclick="setTab('inbox')"><span style="font-size:24px">📥</span><div class="sp"><b>${S.inbox.length} ${plural(S.inbox.length, "трата ждёт", "траты ждут", "трат ждут")} категорию</b>
       <div class="small muted">${fmt0(S.inbox.reduce((a, t) => a + t.amount, 0))} — нажмите, чтобы разобрать</div></div><span>›</span></div>` : ""}
     <button class="btn ghost" onclick="openPlan()">🎯 ${budget ? "Изменить" : "Распределить"} бюджет на ${MONTHS[mo - 1]}</button>
@@ -402,7 +508,7 @@ function renderSettings() {
         <li><b>«Получить значение словаря»</b> → ключ <b>inbox</b></li>
         <li><b>«Если»</b> значение <b>больше 0</b> → <b>«Показать уведомление»</b>, текст — значение ключа <b>text</b> из того же ответа</li>
       </ol>
-      Виджет: отдельная команда с теми же шагами, но значение ключа <b>leftText</b> («Осталось 1 234 zł») → «Показать результат»; добавьте виджет «Команды» на экран Домой.
+      Виджет: отдельная команда с теми же шагами, но значение ключа <b>balanceText</b> («Баланс 5 633 zł · свободно 4 433 zł») или <b>leftText</b> («Осталось 1 234 zł») → «Показать результат»; добавьте виджет «Команды» на экран Домой.
       <div class="code">${esc(hook)}</div>
       <button class="btn ghost" onclick="copy('${esc(hook)}')">📋 Скопировать ссылку</button>
     </div>
@@ -621,7 +727,7 @@ window.openPlan = () => {
   const lim = S.plan.limits || {};
   const { by } = sums();
   openSheet(`<div class="row"><b class="sp">Бюджет на ${monthName(month).toLowerCase()}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
-    <label>Сколько есть на месяц (доход), zł</label><input id="pIncome" inputmode="decimal" value="${S.plan.income || ""}" oninput="planLeft()">
+    <label>Сколько есть на месяц (доход), zł${(S.inc || []).length ? ` — уже пришло ${fmt0(S.inc.reduce((a, t) => a + t.amount, 0))}` : ""}</label><input id="pIncome" inputmode="decimal" value="${S.plan.income || ""}" oninput="planLeft()">
     <div id="pLeft" class="small" style="margin-top:6px"></div>
     <h2>Лимиты по категориям</h2>
     ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}</div>

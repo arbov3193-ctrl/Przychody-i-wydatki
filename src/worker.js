@@ -11,6 +11,10 @@
 //   POST /api/h/<id>/member          (X-Key) {who}
 //   POST /api/h/<id>/settings        (X-Key) {autoSort}   known shops go straight into their category
 //   POST /api/h/<id>/rekey           (X-Key)              → {key}   a new key; the old links and Shortcuts stop working
+//   POST /api/h/<id>/income          (X-Key) {amount, cat, note, who, date}   money coming in
+//   POST /api/h/<id>/income/<incId>  (X-Key) {amount?, cat?, note?, date?, delete?}
+//   POST /api/h/<id>/balance         (X-Key) {amount}     «сейчас на счёте» — the balance is counted from here on
+//   POST /api/h/<id>/debts           (X-Key) {debts: [{id?, name, amount, dir: "we"|"them"}]}   to give back / to get back
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
 //                                    → {ok, amount, cat?, text, alert}   text: «🛒 Продукты 45,20 zł · осталось 300 zł» for a notification
@@ -77,6 +81,9 @@ export class House extends DurableObject {
         rules: (await s.get("rules")) || {},
         recurring: (await s.get("recurring")) || [],
         settings: { autoSort: true, ...((await s.get("settings")) || {}) },
+        inc: (await s.get(`inc:${month}`)) || [],
+        balance: await balanceOf(s),
+        debts: (await s.get("debts")) || [],
         month,
       });
     }
@@ -92,7 +99,8 @@ export class House extends DurableObject {
       const left = Math.round((budget - spent) * 100) / 100;
       const n = inbox.length;
       const text = n ? `📥 Разобрать: ${n} ${plural(n, "трата", "траты", "трат")} на ${zl(total(inbox))}` : "";
-      return json({ inbox: n, inboxSum: total(inbox), spent, budget, left, text, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
+      const bal = await balanceOf(s);
+      return json({ inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
     }
     if (url.pathname === "/inbox") {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
@@ -203,6 +211,51 @@ export class House extends DurableObject {
       await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits });
       return json({ ok: true });
     }
+    if (url.pathname === "/income" && request.method === "POST") {
+      const amount = parseAmount(body.amount);
+      if (!amount) return json({ error: "amount" }, 400);
+      const inc = { id: rand(8), amount, cat: String(body.cat || "other").slice(0, 12), note: String(body.note || "").slice(0, 80), who: String(body.who || "").slice(0, 20),
+        date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now() };
+      const k = `inc:${inc.date.slice(0, 7)}`;
+      const list = (await s.get(k)) || [];
+      list.unshift(inc);
+      await s.put(k, list);
+      return json({ ok: true, inc });
+    }
+    const incEdit = url.pathname.match(/^\/income\/([a-z0-9]{8})$/);
+    if (incEdit) {
+      const month = monthOf(url.searchParams.get("month"));
+      const k = `inc:${month}`;
+      let list = (await s.get(k)) || [];
+      const t = list.find((x) => x.id === incEdit[1]);
+      if (!t) return json({ error: "no income" }, 404);
+      list = list.filter((x) => x.id !== t.id);
+      if (!body.delete) {
+        if (body.cat !== undefined) t.cat = String(body.cat).slice(0, 12);
+        if (body.note !== undefined) t.note = String(body.note).slice(0, 80);
+        if (body.amount !== undefined && parseAmount(body.amount)) t.amount = parseAmount(body.amount);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(body.date || "")) t.date = body.date;
+        if (t.date.slice(0, 7) === month) list.unshift(t);
+        else { const k2 = `inc:${t.date.slice(0, 7)}`; const other = (await s.get(k2)) || []; other.unshift(t); await s.put(k2, other); }
+      }
+      await s.put(k, list);
+      return json({ ok: true });
+    }
+    if (url.pathname === "/balance") {
+      // what the bank shows now; everything recorded later moves the balance from here
+      const amount = Number(String(body.amount ?? "").replace(/\s/g, "").replace(",", "."));
+      if (!Number.isFinite(amount) || Math.abs(amount) >= 1e8) return json({ error: "amount" }, 400);
+      await s.put("balanceStart", { amount: Math.round(amount * 100) / 100, date: today(), time: Date.now() });
+      return json({ ok: true, balance: await balanceOf(s) });
+    }
+    if (url.pathname === "/debts") {
+      const list = (Array.isArray(body.debts) ? body.debts : []).slice(0, 50).map((d) => ({
+        id: /^[a-z0-9]{8}$/.test(d.id || "") ? d.id : rand(8), name: String(d.name || "").trim().slice(0, 40),
+        amount: parseAmount(d.amount), dir: d.dir === "them" ? "them" : "we",
+      })).filter((d) => d.name && d.amount);
+      await s.put("debts", list);
+      return json({ ok: true, debts: list, balance: await balanceOf(s) });
+    }
     if (url.pathname === "/settings") {
       const settings = { autoSort: true, ...((await s.get("settings")) || {}) };
       if (typeof body.autoSort === "boolean") settings.autoSort = body.autoSort;
@@ -235,6 +288,24 @@ export class House extends DurableObject {
     }
     return json({ error: "not found" }, 404);
   }
+}
+
+// The money the family has: «сейчас на счёте» as set by hand (or 0 from the start), plus every income and minus
+// every expense recorded after that moment — the sorted ones and those still waiting in «Разобрать».
+// «Необходимо» is what is still to be given back (debts «we» owe); «свободно» is what is left after that.
+async function balanceOf(s) {
+  const start = (await s.get("balanceStart")) || null;
+  const after = (t) => !start || t.date > start.date || (t.date === start.date && (t.time || 0) > start.time);
+  let value = start ? start.amount : 0, income = 0, spent = 0;
+  for (const list of (await s.list({ prefix: "inc:" })).values()) for (const t of list) if (after(t)) income += t.amount;
+  for (const list of (await s.list({ prefix: "tx:" })).values()) for (const t of list) if (after(t)) spent += t.amount;
+  for (const t of (await s.get("inbox")) || []) if (after(t)) spent += t.amount;
+  const debts = (await s.get("debts")) || [];
+  const need = debts.filter((d) => d.dir === "we").reduce((a, d) => a + d.amount, 0);
+  const owed = debts.filter((d) => d.dir === "them").reduce((a, d) => a + d.amount, 0);
+  const r = (n) => Math.round(n * 100) / 100;
+  value = r(value + income - spent);
+  return { value, need: r(need), owed: r(owed), free: r(value - need), start };
 }
 
 // «BIEDRONKA 1234», «Biedronka  #12» and «biedronka» are one shop for the rules

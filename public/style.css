@@ -47,3 +47,8 @@ ol{padding-left:20px;margin-top:6px}ol li{margin:6px 0}
 .shot input[id^=shm]{flex:1;width:0}
 .shot b{white-space:nowrap}
 .shot .row>.small{flex:1}
+/* balance on top of «Месяц» */
+.bal{display:flex;justify-content:space-between;gap:12px}.bal .big{font-size:30px}.big.need{color:var(--yellow)}
+.neg{color:var(--red)!important}.pos{color:var(--green)}
+.mini{border:1px solid var(--line);background:var(--chip);color:var(--text);border-radius:10px;padding:6px 9px;font-size:13px;font-weight:600;flex:none}
+#tabs button{min-width:0}
