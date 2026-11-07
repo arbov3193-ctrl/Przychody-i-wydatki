@@ -118,11 +118,11 @@ function balanceCard() {
   const mName = MONTHS[Number(month.slice(5)) - 1];
   return `<div class="card">
     <div class="bal">
-      <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div></div>
+      <div onclick="openBalance()"><div class="small muted">Баланс ✎ · есть</div><div class="big ${b.value < 0 ? "neg" : ""}">${fmt0(b.value)}</div>${b.owed ? `<div class="owed" onclick="event.stopPropagation();document.getElementById('owed').scrollIntoView({behavior:'smooth'})">(+${fmt0(b.owed)} должны вернуть)</div>` : ""}</div>
       <div onclick="document.getElementById('budget').scrollIntoView({behavior:'smooth'})" style="text-align:right"><div class="small muted">Бюджет · надо</div><div class="big">${fmt0(bud.total)}</div></div>
     </div>
     <div class="needline ${need > 0 ? "short" : "ok"}">${need > 0 ? `Необходимо: <b>${fmt0(need)}</b>` : `Хватает · останется <b>${fmt0(-need)}</b>`}</div>
-    <div class="row small muted" style="margin-top:6px"><span class="sp">${mName[0].toUpperCase() + mName.slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы${b.owed ? ` · нам должны ${fmt0(b.owed)}` : ""}</span></div>
+    <div class="row small muted" style="margin-top:6px"><span class="sp">${mName[0].toUpperCase() + mName.slice(1)}: <span class="pos">+${fmt0(inc)}</span> доходы · −${fmt0(out)} расходы</span></div>
     ${b.start ? "" : `<div class="small muted" style="margin-top:6px">Нажмите «Баланс», чтобы вписать, сколько сейчас на счёте, — дальше он будет считаться сам.</div>`}
   </div>`;
 }
@@ -139,7 +139,7 @@ function needCard() {
     ${bud.cats.map(catRow).join("")}${bud.debts.map(debtRow).join("")}
     <div class="row" style="gap:8px"><button class="btn ghost sp" onclick="openPlan()">🎯 Суммы</button><button class="btn ghost sp" onclick="openDebt(-1,'we')">＋ Отдать</button></div>
     <div class="small muted" style="margin-top:8px">Справа — сколько ещё надо по категории в этом месяце (лимит минус потраченное). Нажмите на категорию, чтобы поменять сумму, 📝 — заметка.</div></div>
-    ${all.some((d) => d.dir === "them") ? `<h2>Нам должны</h2><div class="card">${all.filter((d) => d.dir === "them").map(debtRow).join("")}</div>` : ""}
+    ${all.some((d) => d.dir === "them") ? `<h2 id="owed">Нам должны</h2><div class="card">${all.filter((d) => d.dir === "them").map(debtRow).join("")}</div>` : ""}
     <button class="btn ghost" onclick="openDebt(-1,'them')">🤝 ＋ Нам должны</button>`;
 }
 window.openNote = (key) => {
@@ -195,7 +195,7 @@ window.delDebt = async (i) => { if (!confirm("Удалить? В траты и �
 // given back → an expense (it leaves the account); got back → an income
 window.settleDebt = async (i) => {
   const x = S.debts[i];
-  if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой «💸 Долги» (лимиты категорий не трогает) и уйдёт из бюджета.` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом.`)) return;
+  if (!confirm(x.dir === "we" ? `Отдали «${x.name}» ${fmt(x.amount)}?\nЗапишется тратой «💸 Долги» (лимиты категорий не трогает) и уйдёт из бюджета.` : `Вернули «${x.name}» ${fmt(x.amount)}?\nЗапишется доходом и прибавится к балансу.`)) return;
   try {
     if (x.dir === "we") await api("/tx", { amount: x.amount, cat: "debt", from: "debt", note: "Долг: " + x.name, who: me, date: todayIso() });
     else await api("/income", { amount: x.amount, cat: "debt", note: x.name, who: me, date: todayIso() });
