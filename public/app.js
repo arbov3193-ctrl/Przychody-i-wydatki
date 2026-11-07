@@ -130,7 +130,7 @@ function balanceCard() {
 const noteBtn = (key, has) => `<button class="mini note ${has ? "has" : ""}" onclick="event.stopPropagation();openNote('${key}')" aria-label="Заметка">📝</button>`;
 function needCard() {
   const bud = budgetNeed(), notes = S.notes || {}, all = S.debts || [];
-  const catRow = (x) => `<div class="cat" onclick="openPlan()"><div class="e">${x.c.emoji}</div><div class="sp"><div class="n">${esc(x.c.name)}</div>
+  const catRow = (x) => `<div class="cat" onclick="openPlan()"><div class="e">${x.c.emoji}</div><div class="sp"><div class="n">${esc(x.c.name)}${x.c.hidden ? " 🙈" : ""}</div>
     ${notes[x.c.id] ? `<div class="small note-t">${esc(notes[x.c.id])}</div>` : ""}</div>
     <div class="r">${!x.lim ? `<span class="muted small">—</span>` : x.sp > x.lim
       ? `<span class="neg">−${fmt0(x.sp - x.lim)}</span><div class="small neg" style="font-weight:600;white-space:nowrap">перерасход</div>`
@@ -503,7 +503,9 @@ function dayName(iso) {
 }
 
 function renderSettings() {
-  const code = `${house.id}.${house.key}`;
+  const full = S.role !== "partner";
+  // the wife's phone gets its own key: the server keeps the 🙈 categories away from it
+  const code = `${house.id}.${full && S.partnerKey ? S.partnerKey : house.key}`;
   const join = `${location.origin}/?join=${code}`;
   const hook = `${location.origin}/api/in/${house.id}/${house.key}`;
   app.innerHTML = `<h1>Ещё</h1>
@@ -511,10 +513,11 @@ function renderSettings() {
       <div class="row"><b class="sp">${esc(S.name || "Семья")}</b></div>
       <label>Этот телефон — кто?</label>
       <div class="chips">${S.members.map((w) => `<button class="${w === me ? "sug" : ""}" onclick="setMe('${esc(w)}')">👤 ${esc(w)}</button>`).join("")}<button onclick="addMember()">＋ добавить</button></div>
-      <label>Подключить второй телефон (жены)</label>
-      <div class="small muted">Откройте на её iPhone эту ссылку в Safari или введите код:</div>
+      ${full ? `<label>Подключить телефон жены</label>
+      <div class="small muted">На её iPhone: Safari → эта ссылка → «Поделиться» → «На экран Домой»; открыть с иконки и вставить ссылку. Категории со значком 🙈 она не увидит.</div>
       <div class="code">${esc(join)}</div>
-      <button class="btn ghost" onclick="share('${esc(join)}')">📤 Отправить ссылку</button>
+      <button class="btn ghost" onclick="share('${esc(join)}')">📤 Отправить ссылку жене</button>
+      <button class="btn ghost" onclick="renewPartner()">🔄 Новая ссылка для жены</button>` : ""}
     </div>
     <h2>Автоматически из Apple Pay</h2><div class="card small">
       Каждая оплата Apple Pay сама попадёт в «Разобрать». Настройте на <b>каждом</b> iPhone (у жены — со своим именем):
@@ -558,17 +561,32 @@ function renderSettings() {
       <button class="btn ghost" onclick="exportYear()">📤 Весь ${month.slice(0, 4)} год (CSV)</button>
     </div>
     <h2>Категории</h2><div class="card">
+      ${full ? `<div class="small muted" style="margin-bottom:6px">🙈 — скрыть от жены: на её телефоне не будет ни категории, ни трат по ней, ни суммы; её баланс меньше на отложенное в ней.</div>` : ""}
       ${S.categories.map((c, i) => `<div class="cat"><input style="width:56px;text-align:center;margin:0" value="${esc(c.emoji)}" onchange="catEdit(${i},'emoji',this.value)">
-        <input style="margin:0" value="${esc(c.name)}" onchange="catEdit(${i},'name',this.value)"><button class="btn ghost" style="width:auto;margin:0;padding:10px" onclick="catDel(${i})">✕</button></div>`).join("")}
+        <input style="margin:0" value="${esc(c.name)}" onchange="catEdit(${i},'name',this.value)">
+        ${full ? `<button class="mini hide ${c.hidden ? "on" : ""}" onclick="catHide(${i})" aria-label="Скрыть от жены">🙈</button>` : ""}
+        <button class="btn ghost" style="width:auto;margin:0;padding:10px" onclick="catDel(${i})">✕</button></div>`).join("")}
       <button class="btn ghost" onclick="catAdd()">＋ Категория</button>
     </div>
     <h2>Установка</h2><div class="card small">На iPhone: Safari → кнопка «Поделиться» → <b>«На экран Домой»</b>. Бюджет откроется как обычное приложение.</div>
-    <h2>Безопасность</h2><div class="card small">
-      Ключ бюджета есть в ссылке для жены и в ссылке «Команд». Если ссылка попала к чужим людям — выдайте новый ключ: старые ссылки перестанут работать.
+    ${full ? `<h2>Безопасность</h2><div class="card small">
+      Ваш ключ есть в вашей ссылке «Команд». Если она попала к чужим людям — выдайте новый ключ: ваши старые ссылки перестанут работать (у жены свой ключ, его меняет «Новая ссылка для жены»).
       <button class="btn ghost" onclick="rekey()">🔑 Выдать новый ключ</button>
-    </div>
+    </div>` : ""}
     <button class="btn red" style="margin-top:24px" onclick="leave()">Отключить этот телефон</button>`;
 }
+window.catHide = async (i) => {
+  const c = S.categories[i];
+  if (!c.hidden && !confirm(`Скрыть «${c.name}» от жены?\n\nНа её телефоне пропадут эта категория, траты по ней, сумма и заметка. Её баланс будет меньше на сумму, отложенную в этой категории.`)) return;
+  c.hidden = !c.hidden;
+  try { await api("/categories", { categories: S.categories }); toast(c.hidden ? "🙈 Скрыто от жены" : "Снова видно жене"); load(); }
+  catch (e) { c.hidden = !c.hidden; toast("Нет связи — попробуйте ещё раз"); }
+};
+window.renewPartner = async () => {
+  if (!confirm("Сделать новую ссылку для жены?\n\nСтарая ссылка и её «Команды» перестанут работать — её телефон попросит новую ссылку.")) return;
+  try { const r = await api("/partner", {}); S.partnerKey = r.partnerKey; render(); toast("🔄 Новая ссылка готова — отправьте жене"); }
+  catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
 window.setAutoSort = async (v) => {
   try { const r = await api("/settings", { autoSort: v }); S.settings = r.settings; toast(v ? "Знакомые магазины — сразу в категорию" : "Все оплаты — в «Разобрать»"); }
   catch (e) { toast("Нет связи — попробуйте ещё раз"); render(); }
@@ -722,7 +740,7 @@ function drawAdd() {
   openSheet(`<div class="row"><b class="sp">Новая трата</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
     <div class="amount">${d.amount ? esc(d.amount.replace(".", ",")) : "0"} zł</div>
     <div class="pad">${["1", "2", "3", "4", "5", "6", "7", "8", "9", ",", "0", "⌫"].map((k) => `<button onclick="key('${k}')">${k}</button>`).join("")}</div>
-    <div class="cats">${S.categories.map((c) => `<button class="${d.cat === c.id ? "on" : ""}" onclick="pickCat('${c.id}')"><span>${c.emoji}</span>${esc(c.name)}</button>`).join("")}</div>
+    <div class="cats">${S.categories.map((c) => `<button class="${d.cat === c.id ? "on" : ""}" onclick="pickCat('${c.id}')"><span>${c.emoji}</span>${esc(c.name)}${c.hidden ? " 🙈" : ""}</button>`).join("")}</div>
     <input id="note" placeholder="Заметка (необязательно)" value="${esc(d.note)}" oninput="draft.note=this.value">
     <div class="chips">${[["Сегодня", todayIso()], ["Вчера", shiftDay(todayIso(), -1)]].map(([n, v]) => `<button class="${d.date === v ? "sug" : ""}" onclick="draft.date='${v}';drawAdd()">${n}</button>`).join("")}
       <input type="date" style="width:auto;margin:0;padding:6px 10px" value="${d.date}" onchange="draft.date=this.value"></div>
@@ -773,7 +791,7 @@ window.openPlan = (draft) => {
     <div id="pLeft" class="small" style="margin-top:6px"></div>
     <h2>Сколько надо по категориям</h2>
     <div class="small muted">Галочка ↪ — сумма перейдёт на следующий месяц. Снимите для разового: подарок, ремонт, поездка.</div>
-    ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}</div>
+    ${S.categories.map((c) => `<div class="cat"><div class="e">${c.emoji}</div><div class="sp"><div class="n">${esc(c.name)}${c.hidden ? " 🙈" : ""}</div>
       <label class="keep"><input type="checkbox" class="keepc" data-id="${c.id}" ${keep[c.id] === false ? "" : "checked"}> ↪ на след. месяц</label>
       ${by[c.id] ? `<div class="small muted">потрачено ${fmt0(by[c.id])}</div>` : ""}</div>
       <input class="lim" data-id="${c.id}" inputmode="decimal" style="width:100px;margin:0;text-align:right" placeholder="0" value="${lim[c.id] || ""}" oninput="planLeft()"></div>`).join("")}

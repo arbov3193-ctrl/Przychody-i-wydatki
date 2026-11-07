@@ -63,3 +63,4 @@ textarea{width:100%;font:inherit;font-size:17px;padding:12px 14px;border-radius:
 /* «↪ на след. месяц» under a category in «Суммы» */
 label.keep{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:12px;font-weight:500;color:var(--muted)}
 label.keep input{width:18px;height:18px;margin:0;padding:0;flex:none}
+.mini.hide{opacity:.35;padding:8px}.mini.hide.on{opacity:1;background:var(--accent);border-color:var(--accent)}

@@ -64,8 +64,19 @@ export class House extends DurableObject {
       await s.put("categories", DEFAULT_CATEGORIES);
       return json({ ok: true });
     }
+    // two keys: the full one (Артур) and the partner's one (жена) — the partner does not get the hidden categories,
+    // their expenses, sums and notes, nor the full-key phone's unsorted payments; her balance has the hidden sums set aside
     const key = await s.get("key");
-    if (!key || request.headers.get("X-Key") !== key) return json({ error: "key" }, 403);
+    let pkey = await s.get("partnerKey");
+    const given = request.headers.get("X-Key");
+    const role = key && given === key ? "full" : pkey && given === pkey ? "partner" : null;
+    if (!role) return json({ error: "key" }, 403);
+    const P = role === "partner";
+    const allCats = (await s.get("categories")) || DEFAULT_CATEGORIES;
+    const hidden = new Set(allCats.filter((c) => c.hidden).map((c) => c.id));
+    const seen = (t) => !P || !hidden.has(t.cat);           // an expense the partner may see
+    const seenIn = (t) => !P || !t.priv;                     // an unsorted payment the partner may see
+    const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !P || !hidden.has(k)));
 
     if (url.pathname === "/state") {
       const month = monthOf(url.searchParams.get("month"));
@@ -76,22 +87,26 @@ export class House extends DurableObject {
         for (const t of txm) if (t.cat === "other" && !t.from && /^Долг: /.test(t.note || "")) { t.cat = "debt"; t.from = "debt"; }
         await s.put(`tx:${month}`, txm);
       }
+      if (!P && !pkey) { pkey = rand(16); await s.put("partnerKey", pkey); }
+      const plan = await planOf(s, month);
       return json({
+        role,
+        partnerKey: P ? undefined : pkey,
         name: await s.get("name"),
         members: (await s.get("members")) || [],
-        categories: (await s.get("categories")) || DEFAULT_CATEGORIES,
-        plan: await planOf(s, month),
+        categories: allCats.filter((c) => !P || !c.hidden),
+        plan: { ...plan, limits: strip(plan.limits), keep: strip(plan.keep) },
         planIsOwn: !!(await s.get(`plan:${month}`)),
-        tx: (await s.get(`tx:${month}`)) || [],
-        prevTotal: total((await s.get(`tx:${prevMonth(month)}`)) || []),
-        inbox: (await s.get("inbox")) || [],
-        rules: (await s.get("rules")) || {},
-        recurring: (await s.get("recurring")) || [],
+        tx: ((await s.get(`tx:${month}`)) || []).filter(seen),
+        prevTotal: total(((await s.get(`tx:${prevMonth(month)}`)) || []).filter(seen)),
+        inbox: ((await s.get("inbox")) || []).filter(seenIn),
+        rules: Object.fromEntries(Object.entries((await s.get("rules")) || {}).filter(([, c]) => !P || !hidden.has(c))),
+        recurring: ((await s.get("recurring")) || []).filter(seen),
         settings: { autoSort: true, ...((await s.get("settings")) || {}) },
         inc: (await s.get(`inc:${month}`)) || [],
-        balance: await balanceOf(s),
+        balance: await balanceOf(s, P ? hidden : null),
         debts: (await s.get("debts")) || [],
-        notes: (await s.get("notes")) || {},
+        notes: strip((await s.get("notes")) || {}),
         month,
       });
     }
@@ -99,27 +114,28 @@ export class House extends DurableObject {
       // for the Shortcut that reminds to sort the payments (and can show «left this month» in a widget)
       const month = today().slice(0, 7);
       await applyRecurring(s, month);
-      const inbox = (await s.get("inbox")) || [];
-      const tx = (await s.get(`tx:${month}`)) || [];
+      const inbox = ((await s.get("inbox")) || []).filter(seenIn);
+      const tx = ((await s.get(`tx:${month}`)) || []).filter(seen);
       const plan = await planOf(s, month);
-      const budget = plan.income || Object.values(plan.limits || {}).reduce((a, b) => a + b, 0);
+      const budget = (P ? 0 : plan.income) || Object.values(strip(plan.limits)).reduce((a, b) => a + b, 0);
       const spent = total(tx);
       const left = Math.round((budget - spent) * 100) / 100;
       const n = inbox.length;
       const text = n ? `📥 Разобрать: ${n} ${plural(n, "трата", "траты", "трат")} на ${zl(total(inbox))}` : "";
-      const bal = await balanceOf(s);
+      const bal = await balanceOf(s, P ? hidden : null);
       return json({ inbox: n, inboxSum: total(inbox), spent, budget, left, text, balance: bal.value, free: bal.free, balanceText: `Баланс ${zl(bal.value)} · свободно ${zl(bal.free)}`, leftText: budget ? (left >= 0 ? `Осталось ${zl(left)}` : `Перерасход ${zl(-left)}`) : `Потрачено ${zl(spent)}` });
     }
     if (url.pathname === "/inbox") {
       // from the Shortcut: «45,20 zł», «PLN 45.20», 45.2 — and the shop's name
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
-      const item = { id: rand(8), amount, merchant: String(body.merchant || "").trim().slice(0, 60), who: String(body.who || "").slice(0, 20), date: today(), time: Date.now() };
+      const item = { id: rand(8), amount, merchant: String(body.merchant || "").trim().slice(0, 60), who: String(body.who || "").slice(0, 20), date: today(), time: Date.now(), ...(P ? {} : { priv: true }) };
       // a shop sorted before goes straight into its category (unless switched off in «Ещё»)
       const settings = { autoSort: true, ...((await s.get("settings")) || {}) };
-      const cats = (await s.get("categories")) || DEFAULT_CATEGORIES;
+      const cats = allCats;
       const cat = settings.autoSort && item.merchant ? ((await s.get("rules")) || {})[shopKey(item.merchant)] : "";
-      if (cat && cats.some((c) => c.id === cat)) {
+      // the partner's payment never goes into a hidden category, even if the shop was sorted there before
+      if (cat && cats.some((c) => c.id === cat) && !(P && hidden.has(cat))) {
         const k = `tx:${item.date.slice(0, 7)}`;
         const list = (await s.get(k)) || [];
         list.unshift({ id: item.id, amount, cat, note: item.merchant, who: item.who, date: item.date, time: item.time, from: "pay", auto: true });
@@ -134,6 +150,7 @@ export class House extends DurableObject {
     if (url.pathname === "/tx" && request.method === "POST") {
       const amount = parseAmount(body.amount);
       if (!amount) return json({ error: "amount" }, 400);
+      if (P && hidden.has(String(body.cat || ""))) return json({ error: "cat" }, 400);
       const tx = { id: rand(8), amount, cat: String(body.cat || ""), note: String(body.note || "").slice(0, 80), who: String(body.who || "").slice(0, 20),
         date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), from: body.from ? String(body.from).slice(0, 8) : undefined };
       // an inbox payment sorted into a category: it leaves the inbox; the shop is remembered for the next time
@@ -144,7 +161,7 @@ export class House extends DurableObject {
         await s.put("rules", rules);
       }
       if (body.inboxId) {
-        const inbox = ((await s.get("inbox")) || []).filter((x) => x.id !== body.inboxId);
+        const inbox = ((await s.get("inbox")) || []).filter((x) => x.id !== body.inboxId || !seenIn(x));
         await s.put("inbox", inbox);
         if (body.merchant && tx.cat) {
           const rules = (await s.get("rules")) || {};
@@ -154,7 +171,7 @@ export class House extends DurableObject {
       }
       if (!tx.cat) {
         const inbox = (await s.get("inbox")) || [];
-        inbox.unshift({ id: tx.id, amount, merchant: tx.note, who: tx.who, date: tx.date, time: tx.time });
+        inbox.unshift({ id: tx.id, amount, merchant: tx.note, who: tx.who, date: tx.date, time: tx.time, ...(P ? {} : { priv: true }) });
         await s.put("inbox", inbox);
         return json({ ok: true, inbox: true });
       }
@@ -168,14 +185,15 @@ export class House extends DurableObject {
     if (edit) {
       const month = monthOf(url.searchParams.get("month"));
       if (url.searchParams.get("inbox")) {
-        const inbox = ((await s.get("inbox")) || []).filter((x) => x.id !== edit[1]);
+        const inbox = ((await s.get("inbox")) || []).filter((x) => x.id !== edit[1] || !seenIn(x));
         await s.put("inbox", inbox);
         return json({ ok: true });
       }
       const k = `tx:${month}`;
       let list = (await s.get(k)) || [];
-      const i = list.findIndex((t) => t.id === edit[1]);
+      const i = list.findIndex((t) => t.id === edit[1] && seen(t));
       if (i < 0) return json({ error: "no tx" }, 404);
+      if (P && hidden.has(String(body.cat || ""))) delete body.cat;
       if (body.delete) list = list.filter((t) => t.id !== edit[1]);
       else {
         const t = list[i];
@@ -206,10 +224,11 @@ export class House extends DurableObject {
     }
     if (url.pathname === "/categories") {
       const cats = (Array.isArray(body.categories) ? body.categories : []).slice(0, 40)
-        .map((c) => ({ id: String(c.id || rand(6)).slice(0, 12), emoji: String(c.emoji || "📦").slice(0, 4), name: String(c.name || "").slice(0, 24) }))
-        .filter((c) => c.name);
+        .map((c) => ({ id: String(c.id || rand(6)).slice(0, 12), emoji: String(c.emoji || "📦").slice(0, 4), name: String(c.name || "").slice(0, 24), ...(!P && c.hidden ? { hidden: true } : {}) }))
+        .filter((c) => c.name && !(P && hidden.has(c.id)));
       if (!cats.length) return json({ error: "empty" }, 400);
-      await s.put("categories", cats);
+      // the partner's list has no hidden categories: they stay as they were
+      await s.put("categories", P ? [...cats, ...allCats.filter((c) => c.hidden)] : cats);
       return json({ ok: true });
     }
     if (url.pathname === "/plan") {
@@ -219,6 +238,12 @@ export class House extends DurableObject {
       // keep: which categories go on to the next month (a one-off one — a birthday, a repair — stays in its month)
       const keep = {};
       for (const [k, v] of Object.entries(body.keep || {})) if (v === false) keep[String(k).slice(0, 12)] = false;
+      if (P) {
+        // the hidden sums are not in the partner's form: keep them
+        const was = await planOf(s, month);
+        for (const k of hidden) { if (was.limits?.[k]) limits[k] = was.limits[k]; if (was.keep?.[k] === false) keep[k] = false; else delete keep[k]; }
+        for (const k of Object.keys(limits)) if (hidden.has(k) && !was.limits?.[k]) delete limits[k];
+      }
       await s.put(`plan:${month}`, { income: parseAmount(body.income) || 0, limits, keep });
       return json({ ok: true });
     }
@@ -270,7 +295,7 @@ export class House extends DurableObject {
     if (url.pathname === "/note") {
       // a note next to a category in «Бюджет» («купить зимнюю резину», «Ивану до 15-го»)
       const k = String(body.key || "").slice(0, 12);
-      if (!k) return json({ error: "key" }, 400);
+      if (!k || (P && hidden.has(k))) return json({ error: "key" }, 400);
       const notes = (await s.get("notes")) || {};
       const text = String(body.text || "").trim().slice(0, 300);
       if (text) notes[k] = text; else delete notes[k];
@@ -283,7 +308,15 @@ export class House extends DurableObject {
       await s.put("settings", settings);
       return json({ ok: true, settings });
     }
+    if (url.pathname === "/partner" && request.method === "POST") {
+      // a new key for the partner's phone: her old link and her Shortcut stop working
+      if (P) return json({ error: "key" }, 403);
+      const k = rand(16);
+      await s.put("partnerKey", k);
+      return json({ ok: true, partnerKey: k });
+    }
     if (url.pathname === "/rekey" && request.method === "POST") {
+      if (P) return json({ error: "key" }, 403);
       const k = rand(16);
       await s.put("key", k);
       return json({ ok: true, key: k });
@@ -295,7 +328,8 @@ export class House extends DurableObject {
         amount: parseAmount(r.amount), cat: String(r.cat || "").slice(0, 12), note: String(r.note || "").slice(0, 80),
         day: Math.min(31, Math.max(1, Math.round(Number(r.day)) || 1)),
         from: /^\d{4}-\d{2}$/.test(r.from || "") ? r.from : cur,
-      })).filter((r) => r.amount && r.cat);
+      })).filter((r) => r.amount && r.cat && !(P && hidden.has(r.cat)));
+      if (P) list.push(...((await s.get("recurring")) || []).filter((r) => hidden.has(r.cat)));
       await s.put("recurring", list);
       return json({ ok: true, recurring: list });
     }
@@ -324,7 +358,7 @@ async function planOf(s, month) {
 // The money the family has: «сейчас на счёте» as set by hand (or 0 from the start), plus every income and minus
 // every expense recorded after that moment — the sorted ones and those still waiting in «Разобрать».
 // «Необходимо» is what is still to be given back (debts «we» owe); «свободно» is what is left after that.
-async function balanceOf(s) {
+async function balanceOf(s, hidden) {
   const start = (await s.get("balanceStart")) || null;
   const after = (t) => !start || t.date > start.date || (t.date === start.date && (t.time || 0) > start.time);
   let value = start ? start.amount : 0, income = 0, spent = 0;
@@ -335,6 +369,19 @@ async function balanceOf(s) {
   const need = debts.filter((d) => d.dir === "we").reduce((a, d) => a + d.amount, 0);
   const owed = debts.filter((d) => d.dir === "them").reduce((a, d) => a + d.amount, 0);
   const r = (n) => Math.round(n * 100) / 100;
+  if (hidden) {
+    // the partner's view: the full-key phone's unsorted payments are not shown to her, so they are not taken off yet;
+    // what is still set aside in the hidden categories this month is taken off — when it is spent, her balance stays the same
+    for (const t of (await s.get("inbox")) || []) if (t.priv && after(t)) spent -= t.amount;
+    const month = today().slice(0, 7);
+    const plan = await planOf(s, month);
+    const tx = (await s.get(`tx:${month}`)) || [];
+    for (const k of hidden) {
+      const lim = (plan.limits || {})[k] || 0;
+      const sp = tx.filter((t) => t.cat === k).reduce((a, t) => a + t.amount, 0);
+      spent += Math.max(0, lim - sp);
+    }
+  }
   value = r(value + income - spent);
   return { value, need: r(need), owed: r(owed), free: r(value - need), start };
 }
