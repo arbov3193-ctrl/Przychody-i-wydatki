@@ -31,7 +31,8 @@ function publicOf(F) {
   const strip = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !hid.has(k)));
   return { ...F, categories: F.categories.filter((c) => !c.hidden), tx: F.tx.filter((t) => !hid.has(t.cat)),
     plan: { ...F.plan, limits: strip(F.plan.limits), keep: strip(F.plan.keep) }, notes: strip(F.notes), recurring: (F.recurring || []).filter((r) => !hid.has(r.cat)),
-    rules: Object.fromEntries(Object.entries(F.rules || {}).filter(([, c]) => !hid.has(c))), balance: F.balanceShared || F.balance };
+    rules: Object.fromEntries(Object.entries(F.rules || {}).filter(([, c]) => !hid.has(c))), balance: F.balanceShared || F.balance,
+    receipts: (F.receipts || []).filter((r) => !hid.has(r.cat)) };
 }
 function setState(F) { SF = F; S = !F || F.role === "partner" || secret ? F : publicOf(F); }
 const everyday = () => S && SF && S !== SF;   // lists sent to the server lack the hidden items — the server keeps them
@@ -97,7 +98,8 @@ const catOf = (id) => S.categories.find((c) => c.id === id) || (id === "debt" ? 
 
 // ------------------------------------------------------------------ screens
 
-function render() {
+function render() { renderScreen(); fillReceipts(); }
+function renderScreen() {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   const badge = $("#badge");
   if (S && S.inbox.length) { badge.style.display = "block"; badge.textContent = S.inbox.length; } else badge.style.display = "none";
@@ -106,6 +108,7 @@ function render() {
   if (tab === "month") renderMonth();
   else if (tab === "inbox") renderInbox();
   else if (tab === "income") renderIncome();
+  else if (tab === "receipts") renderReceipts();
   else if (tab === "history") renderHistory();
   else if (tab === "settings") renderSettings();
 }
@@ -328,7 +331,7 @@ window.sortInbox = async (id, cat) => {
   const t = S.inbox.find((x) => x.id === id);
   S.inbox = S.inbox.filter((x) => x.id !== id);
   render();
-  try { await api("/tx", { amount: t.amount, cat, note: t.merchant, who: t.who, date: t.date, inboxId: id, merchant: t.merchant, from: "pay" }); toast(catOf(cat).emoji + " " + fmt(t.amount)); }
+  try { await api("/tx", { amount: t.amount, cat, note: t.merchant, who: t.who, date: t.date, inboxId: id, merchant: t.merchant, from: "pay", rc: t.rc }); toast(catOf(cat).emoji + " " + fmt(t.amount)); }
   catch (e) { toast("Нет связи — попробуйте ещё раз"); }
   load();
 };
@@ -382,6 +385,7 @@ function amountsIn(text) {
   const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
   const signed = new RegExp(String.raw`([-−–+])\s?` + AMT + String.raw`\s*(?:PLN|zł|zl)`, "i");
   const out = [];
+  out.incomes = [];
   let skipped = 0;
   if (lines.some((l) => /^[-−–]/.test((l.match(signed) || [""])[0]))) {
     // the bank's list of transactions: a row (name, amount) and under it a line with the balance
@@ -403,7 +407,15 @@ function amountsIn(text) {
       const hasBalance = amtRe.test(next) && !signed.test(next);
       if (hasBalance) i++;   // the balance line is not a transaction
       const m = l.match(signed);
-      if (!m || m[1] === "+") { if (hasBalance) skipped++; continue; }   // money coming in has no «−»
+      if (!m || m[1] === "+") {
+        // money coming in has no «−»: offered as an income (the row's own amount, not the balance under it)
+        if (hasBalance) {
+          const a = l.match(amtRe), amount = a ? num(a[1]) : 0;
+          if (amount > 0 && amount < 1000000) out.incomes.push({ amount, merchant: clean(l.slice(0, a.index)).slice(0, 40), date, bank: clean(next.split(new RegExp(AMT))[0]) });
+          else skipped++;
+        }
+        continue;
+      }
       const amount = num(m[2]);
       if (!(amount > 0 && amount < 100000)) continue;
       out.push({ amount, merchant: clean(l.slice(0, m.index)).slice(0, 40), date, bank: hasBalance ? clean(next.split(new RegExp(AMT))[0]) : "" });
@@ -420,7 +432,11 @@ function amountsIn(text) {
     const amount = num(m[2]);
     if (!(amount > 0 && amount < 100000)) return;
     // incoming money (wpływ, przelew przychodzący, зачисление) is not an expense
-    if (/wpływ|wpłyn|wpłata|uznanie|przychodz|otrzyma|зачисл|поступ/i.test(l)) { skipped++; return; }
+    if (/wpływ|wpłyn|wpłata|uznanie|przychodz|otrzyma|зачисл|поступ/i.test(l)) {
+      const from = (l.split(m[0])[1] || "").replace(/^[\s,.:;-]*(od|z|from|от)\s+/i, "").replace(/[,.;]+$/, "").trim();
+      out.incomes.push({ amount, merchant: from.slice(0, 40), date: todayIso(), bank: "" });
+      return;
+    }
     let merchant = (l.split(m[0])[1] || "").replace(/^[\s,.:;-]*(w|u|at|в|na|do)\s+/i, "").replace(/[,.;]+$/, "").trim();
     if (!merchant || merchant.length < 2) merchant = (lines[i + 1] && !/(PLN|zł)/i.test(lines[i + 1]) ? lines[i + 1] : "").slice(0, 40);
     out.push({ amount, merchant: merchant.slice(0, 40), date: todayIso(), bank: "" });
@@ -432,7 +448,7 @@ function amountsIn(text) {
 window.readShots = async (files) => {
   if (!files || !files.length) return;
   openSheet(`<b>Читаю скриншот…</b><div class="small muted" id="ocrState" style="margin-top:8px">Первый раз загружается распознавание (≈5 МБ), потом быстрее.</div>`);
-  let found = [], skipped = 0;
+  let found = [], incomes = [], skipped = 0;
   try {
     const T = await loadTesseract();
     for (const f of files) {
@@ -440,6 +456,7 @@ window.readShots = async (files) => {
       const got = amountsIn(data.text);
       skipped += got.skipped || 0;
       found = found.concat(got);
+      incomes = incomes.concat(got.incomes || []);
     }
   } catch (e) {
     openSheet(`<b>Не получилось прочитать</b><div class="small muted" style="margin-top:8px">Нужен интернет для первого запуска. Попробуйте ещё раз.</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
@@ -449,17 +466,21 @@ window.readShots = async (files) => {
   const uniq = new Map();
   for (const t of found) uniq.set(`${t.date}|${t.amount}|${shopKey(t.merchant)}`, t);
   found = [...uniq.values()].sort((a, b) => b.date.localeCompare(a.date));
-  if (!found.length) {
-    openSheet(`<b>Трат не нашёл</b><div class="small muted" style="margin-top:8px">Подойдёт скриншот «Historia transakcji» из приложения Erste или уведомлений банка с суммой в zł / PLN.${skipped ? ` Поступлений пропущено: ${skipped}.` : ""}</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
+  const uniqI = new Map();
+  for (const t of incomes) uniqI.set(`${t.date}|${t.amount}|${shopKey(t.merchant)}`, t);
+  incomes = [...uniqI.values()].sort((a, b) => b.date.localeCompare(a.date));
+  if (!found.length && !incomes.length) {
+    openSheet(`<b>Ничего не нашёл</b><div class="small muted" style="margin-top:8px">Подойдёт скриншот «Historia transakcji» из приложения Erste или уведомлений банка с суммой в zł / PLN.</div><button class="btn ghost" onclick="closeSheet()">OK</button>`);
     return;
   }
   // what is already in the budget (an Apple Pay payment the same day with the same amount) is not ticked
-  const have = new Set();
+  const have = new Set(), haveI = new Set();
   const add = (list) => (list || []).forEach((t) => have.add(`${t.date}|${t.amount}`));
-  add(S.tx); add(S.inbox);
-  for (const m of new Set(found.map((t) => t.date.slice(0, 7)))) {
+  const addI = (list) => (list || []).forEach((t) => haveI.add(`${t.date}|${t.amount}`));
+  add(S.tx); add(S.inbox); addI(S.inc);
+  for (const m of new Set([...found, ...incomes].map((t) => t.date.slice(0, 7)))) {
     if (m === S.month) continue;
-    try { add((await api("/state?month=" + m)).tx); } catch (e) {}
+    try { const o = await api("/state?month=" + m); add(o.tx); addI(o.inc); } catch (e) {}
   }
   const seen = LS.get("shotSeen", {});
   found = found.map((t) => {
@@ -467,16 +488,36 @@ window.readShots = async (files) => {
     return { ...t, sig, dup: !!seen[sig] || have.has(`${t.date}|${t.amount}`), cat: S.rules[shopKey(t.merchant)] || bankCat(t.bank) };
   });
   shotFound = found;
+  // money coming in: already recorded incomes and cash put in at a cash machine (own money, not an income) are not ticked
+  incomes = incomes.map((t) => {
+    const sig = `in|${t.date}|${t.amount}|${shopKey(t.merchant)}`;
+    const own = /wpłatomat|wpłata we|wpłata gotówk|przelew własny|własny/i.test(t.bank + " " + t.merchant);
+    return { ...t, sig, own, dup: !!seen[sig] || haveI.has(`${t.date}|${t.amount}`), cat: incomeCatOf(t) };
+  });
+  shotIncomes = incomes;
   const dups = found.filter((t) => t.dup).length;
-  openSheet(`<div class="row"><b class="sp">Найдено трат: ${found.length}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
-    <div class="small muted" style="margin-top:4px">С категорией — сразу в бюджет, без неё — в «Разобрать».${dups ? ` Уже записанные (${dups}) сняты.` : ""}${skipped ? ` Поступления не трата — пропущено ${skipped}.` : ""}</div>
+  openSheet(`<div class="row"><b class="sp">Найдено: ${found.length} ${plural(found.length, "трата", "траты", "трат")}${incomes.length ? `, ${incomes.length} ${plural(incomes.length, "поступление", "поступления", "поступлений")}` : ""}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    ${found.length ? `<h2>Траты</h2><div class="small muted">С категорией — сразу в бюджет, без неё — в «Разобрать».${dups ? ` Уже записанные (${dups}) сняты.` : ""}</div>` : ""}
     ${found.map((t, i) => `<div class="shot"><input type="checkbox" id="sh${i}" ${t.dup ? "" : "checked"}>
       <div class="sp"><div class="row" style="gap:8px"><input id="shm${i}" class="sp" value="${esc(t.merchant)}" placeholder="Магазин"><b>${fmt(t.amount)}</b></div>
         <div class="row" style="gap:8px;margin-top:4px"><span class="small muted sp">${t.date.slice(8, 10)}.${t.date.slice(5, 7)}${t.bank ? " · " + esc(t.bank) : ""}</span>
         <select id="shc${i}">${[`<option value="">📥 Разобрать</option>`, ...S.categories.map((c) => `<option value="${c.id}" ${c.id === t.cat ? "selected" : ""}>${c.emoji} ${esc(c.name)}</option>`)].join("")}</select></div></div></div>`).join("")}
+    ${incomes.length ? `<h2>Поступления → «Доходы»</h2><div class="small muted">Уже записанные и пополнения через банкомат (свои же деньги) сняты.</div>
+    ${incomes.map((t, i) => `<div class="shot"><input type="checkbox" id="si${i}" ${t.dup || t.own ? "" : "checked"}>
+      <div class="sp"><div class="row" style="gap:8px"><input id="sim${i}" class="sp" value="${esc(t.merchant)}" placeholder="Откуда"><b class="pos">+${fmt(t.amount)}</b></div>
+        <div class="row" style="gap:8px;margin-top:4px"><span class="small muted sp">${t.date.slice(8, 10)}.${t.date.slice(5, 7)}${t.bank ? " · " + esc(t.bank) : ""}</span>
+        <select id="sic${i}">${INCOME_CATS.map((c) => `<option value="${c.id}" ${c.id === t.cat ? "selected" : ""}>${c.emoji} ${c.name}</option>`).join("")}</select></div></div></div>`).join("")}` : ""}
     <button class="btn" onclick="addShots()">Добавить отмеченные</button>`);
 };
-let shotFound = [];
+// the bank's words → our kinds of income
+function incomeCatOf(t) {
+  const w = t.bank + " " + t.merchant;
+  if (/wynagrodz|pensj|premi|płac/i.test(w)) return "salary";
+  if (/zus|800|świadcz|zasił|rodzin|socjal/i.test(w)) return "benefit";
+  if (/zwrot|refund|return/i.test(w)) return "refund";
+  return "other";
+}
+let shotFound = [], shotIncomes = [];
 window.addShots = async () => {
   const seen = LS.get("shotSeen", {});
   let n = 0, toInbox = 0;
@@ -490,8 +531,14 @@ window.addShots = async () => {
       n++; if (!cat) toInbox++; seen[t.sig] = Date.now();
     } catch (e) {}
   }
+  let ni = 0;
+  for (let i = 0; i < shotIncomes.length; i++) {
+    if (!$("#si" + i).checked) continue;
+    const t = shotIncomes[i];
+    try { await api("/income", { amount: t.amount, cat: $("#sic" + i).value, note: $("#sim" + i).value.trim(), who: me, date: t.date }); ni++; seen[t.sig] = Date.now(); } catch (e) {}
+  }
   LS.set("shotSeen", seen);
-  closeSheet(); toast(`Добавлено: ${n}${toInbox ? ` (в «Разобрать»: ${toInbox})` : ""}`); load();
+  closeSheet(); toast(`Добавлено: ${n} ${plural(n, "трата", "траты", "трат")}${toInbox ? ` (в «Разобрать»: ${toInbox})` : ""}${ni ? `, ${ni} в «Доходы»` : ""}`); load();
 };
 
 let histFilter = null;
@@ -515,7 +562,7 @@ function histList() {
     if (t.date !== day) { day = t.date; html += `<div class="day">${dayName(day)}</div>`; }
     const c = catOf(t.cat);
     html += `<div class="item" onclick="openEdit('${t.id}')"><div class="e">${c.emoji}</div><div class="sp"><div>${esc(t.note || c.name)}</div>
-      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" + (t.auto ? " · авто" : "") : t.from === "rec" ? " · 🔁 каждый месяц" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
+      <div class="small muted">${esc(c.name)}${t.who ? " · " + esc(t.who) : ""}${t.from === "pay" ? " · Apple Pay" + (t.auto ? " · авто" : "") : t.from === "rec" ? " · 🔁 каждый месяц" : ""}${t.rc ? " · 🧾" : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`;
   }
   return html + `</div><div class="small muted" style="text-align:center;margin-top:10px">Итого: ${fmt(list.reduce((a, t) => a + t.amount, 0))}</div>
     ${q || histFilter ? "" : `<button class="btn ghost" onclick="exportCsv()">📤 Выгрузить ${MONTHS[Number(month.slice(5)) - 1]} в Excel (CSV)</button>`}`;
@@ -718,6 +765,104 @@ window.exportYear = async () => {
   saveFile(`budget-${y}.csv`, csvOf(all));
 };
 
+// ------------------------------------------------------------------ receipts
+
+// a photo is made small on the phone: ≈1600 px JPEG for reading the receipt, 240 px for the list
+function shrink(file, max, q) {
+  return new Promise((ok, no) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      ok(c.toDataURL("image/jpeg", q));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); no(new Error("image")); };
+    img.src = url;
+  });
+}
+async function readReceipt(file) {
+  let img = await shrink(file, 1600, 0.72);
+  if (img.length > 2400000) img = await shrink(file, 1200, 0.6);   // base64 ≈ 4/3 of the bytes; the server takes up to 1.9 MB
+  return { img, thumb: await shrink(file, 240, 0.6) };
+}
+async function uploadReceipt(d, date) { return (await api("/receipt", { img: d.img, thumb: d.thumb, date, who: me })).id; }
+
+// where the picked photo goes: «add» (the new expense), «tx:<id>» (an expense), «new» (a receipt on its own)
+let rcTarget = "";
+window.pickReceipt = (target) => { rcTarget = target; const f = $("#rcFile"); f.value = ""; f.click(); };
+window.gotReceipt = async (files) => {
+  const file = files && files[0];
+  if (!file) return;
+  toast("Обрабатываю фото…");
+  let d;
+  try { d = await readReceipt(file); } catch (e) { return toast("Не получилось прочитать фото"); }
+  if (rcTarget === "add") { draft.rcData = d; drawAdd(); return; }
+  try {
+    if (rcTarget.startsWith("tx:")) {
+      const t = S.tx.find((x) => x.id === rcTarget.slice(3));
+      const id = await uploadReceipt(d, t ? t.date : todayIso());
+      await api(`/receipt/${id}`, { tx: rcTarget.slice(3), month });
+      closeSheet(); toast("🧾 Чек прикреплён");
+    } else {
+      const id = await uploadReceipt(d, month === todayIso().slice(0, 7) ? todayIso() : month + "-01");
+      toast("🧾 Чек сохранён"); await load(); openReceipt(id); return;
+    }
+  } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+  load();
+};
+
+// pictures come with the key in a header, so they are fetched and shown from memory
+const rcCache = {};
+function rcUrl(id, thumb) {
+  const k = id + (thumb ? ":t" : "");
+  if (!rcCache[k]) rcCache[k] = fetch(`/api/h/${house.id}/receipt/${id}${thumb ? "?thumb=1" : ""}`, { headers: { "X-Key": house.key } })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(r.status)))).then((b) => URL.createObjectURL(b)).catch((e) => { delete rcCache[k]; throw e; });
+  return rcCache[k];
+}
+function fillReceipts() {
+  document.querySelectorAll("img[data-rc]:not([src])").forEach((el) => rcUrl(el.dataset.rc, el.dataset.thumb).then((u) => { el.src = u; }).catch(() => { el.alt = "нет связи"; }));
+}
+
+function renderReceipts() {
+  const list = [...(S.receipts || [])].sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  let html = monthHeader() + `<button class="btn" onclick="pickReceipt('new')">📷 Добавить чек</button>
+    <div class="small muted" style="text-align:center;margin-top:6px">Фото чека можно прикрепить и к трате: «История» → трата → «📎».</div>`;
+  if (!list.length) return (app.innerHTML = html + `<div class="empty">🧾<br><br>Чеков за этот месяц нет. Сфотографируйте чек — для гарантии, возврата или просто на память.</div>`);
+  let day = "";
+  html += `<div class="rcgrid">`;
+  for (const r of list) {
+    const t = r.tx ? S.tx.find((x) => x.id === r.tx) : null;
+    html += `<div class="rc" onclick="openReceipt('${r.id}')"><img data-rc="${r.id}" data-thumb="1" alt="">
+      <div class="small"><b>${r.amount ? fmt0(r.amount) : "—"}</b> · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}</div>
+      <div class="small muted rcn">${esc(t ? t.note || catOf(t.cat).name : r.note || (r.tx ? "" : "без траты"))}</div></div>`;
+  }
+  app.innerHTML = html + `</div>`;
+}
+window.openReceipt = (id) => {
+  const r = (S.receipts || []).find((x) => x.id === id) || { id, date: todayIso() };
+  const t = r.tx ? S.tx.find((x) => x.id === r.tx) : null;
+  openSheet(`<div class="row"><b class="sp">🧾 Чек · ${r.date.slice(8, 10)}.${r.date.slice(5, 7)}.${r.date.slice(0, 4)}</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="closeSheet()">✕</button></div>
+    <div class="rcfull" onclick="this.classList.toggle('zoom')"><img data-rc="${id}" alt="Загрузка…"></div>
+    <div class="small muted" style="margin-top:6px">Нажмите на фото, чтобы увеличить.</div>
+    ${t ? `<div class="item" onclick="openEdit('${t.id}')"><div class="e">${catOf(t.cat).emoji}</div><div class="sp"><div>${esc(t.note || catOf(t.cat).name)}</div><div class="small muted">${esc(catOf(t.cat).name)}${t.who ? " · " + esc(t.who) : ""}</div></div><div class="a">${fmt(t.amount)}</div></div>`
+      : `<button class="btn ghost" onclick="linkReceipt('${id}')">🔗 Привязать к трате</button>`}
+    <button class="btn red" onclick="delReceipt('${id}')">Удалить чек</button>`);
+};
+window.linkReceipt = (id) => {
+  const free = S.tx.filter((t) => !t.rc).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  openSheet(`<div class="row"><b class="sp">К какой трате?</b><button class="btn ghost" style="width:auto;margin:0;padding:8px 12px" onclick="openReceipt('${id}')">‹</button></div>
+    ${free.length ? free.map((t) => `<div class="item" onclick="doLink('${id}','${t.id}')"><div class="e">${catOf(t.cat).emoji}</div><div class="sp"><div>${esc(t.note || catOf(t.cat).name)}</div>
+      <div class="small muted">${t.date.slice(8, 10)}.${t.date.slice(5, 7)} · ${esc(catOf(t.cat).name)}</div></div><div class="a">${fmt(t.amount)}</div></div>`).join("") : `<div class="empty">В этом месяце нет трат без чека</div>`}`);
+};
+window.doLink = async (id, tx) => { try { await api(`/receipt/${id}`, { tx, month }); toast("🔗 Привязано"); await load(); openReceipt(id); } catch (e) { toast("Нет связи — попробуйте ещё раз"); } };
+window.delReceipt = async (id) => {
+  if (!confirm("Удалить фото чека? Трата останется.")) return;
+  try { await api(`/receipt/${id}`, { delete: true }); closeSheet(); toast("Чек удалён"); load(); } catch (e) { toast("Нет связи — попробуйте ещё раз"); }
+};
+
 // ------------------------------------------------------------------ the first start
 
 function renderStart() {
@@ -753,7 +898,7 @@ window.joinBy = async (raw, who) => {
 
 // ------------------------------------------------------------------ sheets: add, edit, plan
 
-function openSheet(html) { const s = $("#sheet"); s.innerHTML = `<div class="in">${html}</div>`; s.classList.add("on"); }
+function openSheet(html) { const s = $("#sheet"); s.innerHTML = `<div class="in">${html}</div>`; s.classList.add("on"); fillReceipts(); }
 function closeSheet() { $("#sheet").classList.remove("on"); }
 $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
 window.closeSheet = closeSheet;
@@ -773,6 +918,7 @@ function drawAdd() {
     <div class="chips">${[["Сегодня", todayIso()], ["Вчера", shiftDay(todayIso(), -1)]].map(([n, v]) => `<button class="${d.date === v ? "sug" : ""}" onclick="draft.date='${v}';drawAdd()">${n}</button>`).join("")}
       <input type="date" style="width:auto;margin:0;padding:6px 10px" value="${d.date}" onchange="draft.date=this.value"></div>
     ${S.members.length > 1 ? `<div class="chips">${S.members.map((w) => `<button class="${d.who === w ? "sug" : ""}" onclick="draft.who='${esc(w)}';drawAdd()">👤 ${esc(w)}</button>`).join("")}</div>` : ""}
+    <button class="btn ghost" onclick="pickReceipt('add')">${d.rcData ? `<img class="rcmini" src="${d.rcData.thumb}"> Чек прикреплён ✓ (заменить)` : "📎 Фото чека"}</button>
     <button class="btn" onclick="saveAdd()">Сохранить${d.cat ? "" : " в «Разобрать»"}</button>`);
 }
 window.key = (k) => {
@@ -785,10 +931,14 @@ window.key = (k) => {
 window.pickCat = (c) => { draft.cat = draft.cat === c ? "" : c; drawAdd(); };
 window.saveAdd = async () => {
   if (!Number(draft.amount)) return toast("Введите сумму");
-  const t = { ...draft, amount: Number(draft.amount) };
+  const { rcData, ...rest } = draft;
+  const t = { ...rest, amount: Number(draft.amount) };
   closeSheet();
-  try { await api("/tx", t); toast((draft.cat ? catOf(draft.cat).emoji + " " : "📥 ") + fmt(t.amount)); }
-  catch (e) { const q = LS.get("queue", []); q.push(t); LS.set("queue", q); toast("Нет интернета — сохраню позже"); }
+  try {
+    if (rcData) t.rc = await uploadReceipt(rcData, t.date);
+    await api("/tx", t); toast((draft.cat ? catOf(draft.cat).emoji + " " : "📥 ") + fmt(t.amount) + (rcData ? " · 🧾" : ""));
+  }
+  catch (e) { delete t.rc; const q = LS.get("queue", []); q.push(t); LS.set("queue", q); toast(rcData ? "Нет интернета — трата сохранится позже, чек нет" : "Нет интернета — сохраню позже"); }
   load();
 };
 
@@ -800,8 +950,10 @@ window.openEdit = (id) => {
     <label>Заметка</label><input id="eNote" value="${esc(t.note)}">
     <label>Дата</label><input id="eDate" type="date" value="${t.date}">
     <label>Категория</label><div class="cats">${S.categories.map((c) => `<button class="${t.cat === c.id ? "on" : ""}" onclick="document.querySelectorAll('#sheet .cats button').forEach(b=>b.classList.remove('on'));this.classList.add('on');this.dataset.pick=1" data-id="${c.id}"><span>${c.emoji}</span>${esc(c.name)}</button>`).join("")}</div>
+    ${t.rc ? `<label>Чек</label><img class="rcthumb" data-rc="${t.rc}" data-thumb="1" onclick="openReceipt('${t.rc}')">` : ""}
+    <button class="btn ghost" onclick="pickReceipt('tx:${id}')">${t.rc ? "📎 Заменить фото чека" : "📎 Прикрепить фото чека"}</button>
     <button class="btn" onclick="saveEdit('${id}')">Сохранить</button>
-    <button class="btn red" onclick="delTx('${id}')">Удалить</button>`);
+    <button class="btn red" onclick="delTx('${id}')">Удалить${t.rc ? " (вместе с чеком)" : ""}</button>`);
 };
 window.saveEdit = async (id) => {
   const cat = $("#sheet .cats button.on")?.dataset.id;

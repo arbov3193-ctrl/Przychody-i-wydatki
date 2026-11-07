@@ -15,6 +15,9 @@
 //   POST /api/h/<id>/income/<incId>  (X-Key) {amount?, cat?, note?, date?, delete?}
 //   POST /api/h/<id>/balance         (X-Key) {amount}     «сейчас на счёте» — the balance is counted from here on
 //   POST /api/h/<id>/debts           (X-Key) {debts: [{id?, name, amount, dir: "we"|"them", note?}]}   to give back / to get back
+//   POST /api/h/<id>/receipt         (X-Key) {img, thumb (base64 jpeg), tx?, month?}  → {id}   a photo of a receipt
+//   GET  /api/h/<id>/receipt/<rId>   (X-Key) [?thumb=1]  → image/jpeg
+//   POST /api/h/<id>/receipt/<rId>   (X-Key) {tx, month} — attach to an expense | {delete: true}
 //   POST /api/h/<id>/note            (X-Key) {key: categoryId, text}   a note next to a category («» removes it)
 //   POST /api/h/<id>/recurring       (X-Key) {recurring: [{id?, amount, cat, note, day, from?}]}  monthly expenses (rent, phone…)
 //   POST /api/in/<id>/<key>          {amount, merchant, who}   from the iPhone Shortcut (key in the path)
@@ -111,6 +114,7 @@ export class House extends DurableObject {
         balanceShared: P ? undefined : await balanceOf(s, hidden),   // what the wife sees — the full phone's everyday look
         debts: (await s.get("debts")) || [],
         notes: strip((await s.get("notes")) || {}),
+        receipts: ((await s.get("receipts")) || []).filter((r) => r.date.slice(0, 7) === month && seen(r)),
         month,
       });
     }
@@ -156,7 +160,8 @@ export class House extends DurableObject {
       if (!amount) return json({ error: "amount" }, 400);
       if (P && hidden.has(String(body.cat || ""))) return json({ error: "cat" }, 400);
       const tx = { id: rand(8), amount, cat: String(body.cat || ""), note: String(body.note || "").slice(0, 80), who: await who(body.who),
-        date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), from: body.from ? String(body.from).slice(0, 8) : undefined };
+        date: /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : today(), time: Date.now(), from: body.from ? String(body.from).slice(0, 8) : undefined,
+        rc: /^[a-z0-9]{8}$/.test(body.rc || "") ? body.rc : undefined };
       // an inbox payment sorted into a category: it leaves the inbox; the shop is remembered for the next time
       if (body.remember && body.merchant && tx.cat) {
         // sorted by hand on the screenshot sheet: the shop goes there next time too
@@ -175,14 +180,16 @@ export class House extends DurableObject {
       }
       if (!tx.cat) {
         const inbox = (await s.get("inbox")) || [];
-        inbox.unshift({ id: tx.id, amount, merchant: tx.note, who: tx.who, date: tx.date, time: tx.time, ...(P ? {} : { priv: true }) });
+        inbox.unshift({ id: tx.id, amount, merchant: tx.note, who: tx.who, date: tx.date, time: tx.time, rc: tx.rc, ...(P ? {} : { priv: true }) });
         await s.put("inbox", inbox);
+        if (tx.rc) await rcSet(s, tx.rc, { tx: "", cat: "", amount, note: tx.note });
         return json({ ok: true, inbox: true });
       }
       const k = `tx:${tx.date.slice(0, 7)}`;
       const list = (await s.get(k)) || [];
       list.unshift(tx);
       await s.put(k, list);
+      if (tx.rc) await rcSet(s, tx.rc, { tx: tx.id, month: tx.date.slice(0, 7), cat: tx.cat, amount, note: tx.note });
       return json({ ok: true, tx });
     }
     const edit = url.pathname.match(/^\/tx\/([a-z0-9]{8})$/);
@@ -198,8 +205,11 @@ export class House extends DurableObject {
       const i = list.findIndex((t) => t.id === edit[1] && seen(t));
       if (i < 0) return json({ error: "no tx" }, 404);
       if (P && hidden.has(String(body.cat || ""))) delete body.cat;
-      if (body.delete) list = list.filter((t) => t.id !== edit[1]);
-      else {
+      if (body.delete) {
+        // the expense goes, and its receipt with it
+        if (list[i].rc) await rcDel(s, list[i].rc);
+        list = list.filter((t) => t.id !== edit[1]);
+      } else {
         const t = list[i];
         if (body.cat !== undefined && body.cat !== t.cat) {
           t.cat = String(body.cat);
@@ -222,6 +232,7 @@ export class House extends DurableObject {
           other.unshift(t);
           await s.put(k2, other);
         } else if (body.date) t.date = body.date;
+        if (t.rc) await rcSet(s, t.rc, { tx: t.id, month: t.date.slice(0, 7), cat: t.cat, amount: t.amount, note: t.note });
       }
       await s.put(k, list);
       return json({ ok: true });
@@ -296,6 +307,47 @@ export class House extends DurableObject {
       await s.put("debts", list);
       return json({ ok: true, debts: list, balance: await balanceOf(s) });
     }
+    if (url.pathname === "/receipt" && request.method === "POST") {
+      // the phone sends the photo already made small (≈1600 px JPEG) and a little one for the list
+      const img = b64(body.img), thumb = b64(body.thumb);
+      if (!img || img.byteLength > 1900000 || !thumb || thumb.byteLength > 200000) return json({ error: "image" }, 400);
+      const id = rand(8);
+      await s.put(`img:${id}`, img);
+      await s.put(`thm:${id}`, thumb);
+      const list = (await s.get("receipts")) || [];
+      list.unshift({ id, date: /^\d{4}-\d{2}-\d{2}$/.test(body.date || "") ? body.date : today(), time: Date.now(), who: await who(body.who), tx: "", cat: "", amount: 0, note: String(body.note || "").slice(0, 80), size: img.byteLength });
+      await s.put("receipts", list.slice(0, 2000));
+      return json({ ok: true, id });
+    }
+    const rcM = url.pathname.match(/^\/receipt\/([a-z0-9]{8})$/);
+    if (rcM) {
+      const meta = ((await s.get("receipts")) || []).find((r) => r.id === rcM[1]);
+      if (!meta || !seen(meta)) return json({ error: "no receipt" }, 404);
+      if (request.method === "GET") {
+        const bytes = await s.get(`${url.searchParams.get("thumb") ? "thm" : "img"}:${meta.id}`);
+        return bytes ? new Response(bytes, { headers: { "content-type": "image/jpeg", "cache-control": "private, max-age=31536000" } }) : json({ error: "no image" }, 404);
+      }
+      if (body.delete) {
+        // the expense stays, only its photo goes
+        if (meta.tx && meta.month) { const k = `tx:${meta.month}`; const l = (await s.get(k)) || []; await s.put(k, l.map((t) => (t.id === meta.tx ? { ...t, rc: undefined } : t))); }
+        await rcDel(s, meta.id);
+        return json({ ok: true });
+      }
+      if (/^[a-z0-9]{8}$/.test(body.tx || "")) {
+        // attach to an expense (one photo per expense: the one it had is let go, not deleted)
+        const k = `tx:${monthOf(body.month)}`;
+        const l = (await s.get(k)) || [];
+        const t = l.find((x) => x.id === body.tx && seen(x));
+        if (!t) return json({ error: "no tx" }, 404);
+        if (t.rc && t.rc !== meta.id) await rcSet(s, t.rc, { tx: "", cat: "", amount: 0 });
+        if (meta.tx && meta.tx !== t.id && meta.month) { const k0 = `tx:${meta.month}`; const l0 = (await s.get(k0)) || []; await s.put(k0, l0.map((x) => (x.id === meta.tx ? { ...x, rc: undefined } : x))); }
+        t.rc = meta.id;
+        await s.put(k, l);
+        await rcSet(s, meta.id, { tx: t.id, month: t.date.slice(0, 7), cat: t.cat, amount: t.amount, note: t.note });
+        return json({ ok: true });
+      }
+      return json({ error: "what" }, 400);
+    }
     if (url.pathname === "/note") {
       // a note next to a category in «Бюджет» («купить зимнюю резину», «Ивану до 15-го»)
       const k = String(body.key || "").slice(0, 12);
@@ -363,6 +415,21 @@ async function fullName(s, v) {
   for (const [k, list] of await s.list({ prefix: "inc:" })) await fix(k, list);
   await fix("inbox", (await s.get("inbox")) || []);
   return w;
+}
+
+// Receipts: the photo (`img:<id>`), its small copy (`thm:<id>`) and a line in `receipts` — the date, who, and the expense
+// it belongs to (its category is kept there too, so a receipt of a hidden expense is hidden with it).
+const b64 = (v) => { try { const t = atob(String(v || "").replace(/^data:[^,]*,/, "")); const u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i); return u.length ? u : null; } catch (e) { return null; } };
+async function rcSet(s, id, patch) {
+  const list = (await s.get("receipts")) || [];
+  const r = list.find((x) => x.id === id);
+  if (!r) return;
+  Object.assign(r, patch);
+  await s.put("receipts", list);
+}
+async function rcDel(s, id) {
+  await s.delete([`img:${id}`, `thm:${id}`]);
+  await s.put("receipts", ((await s.get("receipts")) || []).filter((r) => r.id !== id));
 }
 
 // The month's plan; a month without its own starts from the one before, with only the categories ticked «на след. месяц»

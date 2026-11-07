@@ -21,11 +21,13 @@
   <button data-tab="income"><span>💼</span>Доходы</button>
   <button data-tab="add" class="plus"><span>＋</span></button>
   <button data-tab="inbox"><span>📥</span>Разобрать<i id="badge"></i></button>
-  <button data-tab="history"><span>🧾</span>История</button>
+  <button data-tab="history"><span>📜</span>История</button>
+  <button data-tab="receipts"><span>🧾</span>Чеки</button>
   <button data-tab="settings"><span>⚙️</span>Ещё</button>
 </nav>
 <div id="sheet" class="sheet"></div>
 <div id="toast"></div>
+<input id="rcFile" type="file" accept="image/*" style="display:none" onchange="gotReceipt(this.files)">
 <script src="app.js"></script>
 </body>
 </html>

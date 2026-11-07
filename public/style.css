@@ -67,3 +67,13 @@ label.keep input{width:18px;height:18px;margin:0;padding:0;flex:none}
 .month h1{-webkit-user-select:none;user-select:none;cursor:default}
 .month h1.sec{text-decoration:underline dotted var(--muted);text-underline-offset:6px;text-decoration-thickness:2px}
 .whoami{margin-top:8px;font-weight:700;font-size:17px}
+/* receipts */
+.rcgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.rc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:6px;min-width:0}
+.rc img{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:10px;background:var(--chip);display:block}
+.rc .small{margin-top:4px}.rcn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rcfull{margin-top:10px;max-height:62vh;overflow:auto;border-radius:12px;background:var(--chip)}
+.rcfull img{width:100%;display:block}.rcfull.zoom img{width:250%}
+.rcthumb{display:block;width:96px;height:128px;object-fit:cover;border-radius:10px;margin-top:6px;background:var(--chip)}
+.rcmini{width:22px;height:22px;object-fit:cover;border-radius:5px;vertical-align:middle;margin-right:4px}
+#tabs button{font-size:10px;padding:0 1px}#tabs button span{font-size:21px}
