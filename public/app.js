@@ -132,7 +132,9 @@ function needCard() {
   const bud = budgetNeed(), notes = S.notes || {}, all = S.debts || [];
   const catRow = (x) => `<div class="cat" onclick="openPlan()"><div class="e">${x.c.emoji}</div><div class="sp"><div class="n">${esc(x.c.name)}</div>
     ${notes[x.c.id] ? `<div class="small note-t">${esc(notes[x.c.id])}</div>` : ""}</div>
-    <div class="r">${x.lim ? fmt0(x.rest) : `<span class="muted small">—</span>`}${x.lim ? `<div class="small muted" style="font-weight:400">из ${fmt0(x.lim)}</div>` : ""}</div>${noteBtn(x.c.id, notes[x.c.id])}</div>`;
+    <div class="r">${!x.lim ? `<span class="muted small">—</span>` : x.sp > x.lim
+      ? `<span class="neg">−${fmt0(x.sp - x.lim)}</span><div class="small neg" style="font-weight:600;white-space:nowrap">перерасход</div>`
+      : `${fmt0(x.rest)}<div class="small muted" style="font-weight:400">из ${fmt0(x.lim)}</div>`}</div>${noteBtn(x.c.id, notes[x.c.id])}</div>`;
   const debtRow = (d) => { const i = all.indexOf(d); return `<div class="cat"><div class="e">${d.dir === "we" ? "💸" : "🤝"}</div><div class="sp" onclick="openDebt(${i})"><div class="n">${esc(d.name)}</div>
     ${d.note ? `<div class="small note-t">${esc(d.note)}</div>` : `<div class="small muted">${d.dir === "we" ? "нужно отдать" : "должны нам"}</div>`}</div>
     <div class="r">${fmt0(d.amount)}</div>${noteBtn("d:" + i, d.note)}<button class="mini" onclick="settleDebt(${i})">${d.dir === "we" ? "Отдали" : "Вернули"}</button></div>`; };
